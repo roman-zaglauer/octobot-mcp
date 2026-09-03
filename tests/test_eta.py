@@ -19,6 +19,8 @@ from octobot_mcp.eta import (
     STALENESS_MULTIPLE,
     WATCHER_INTERVAL_SECONDS,
     bound_samples,
+    estimate_combined_eta,
+    estimate_combined_progress,
     estimate_eta,
 )
 
@@ -318,3 +320,120 @@ def test_demo_replays_a_real_captured_progress_sequence_and_produces_sane_etas()
     confidences = [confidence for _, _, confidence in results]
     assert confidences[0] == "low"  # first tick: len(samples) < 2
     assert "medium" in confidences or "high" in confidences
+
+
+# --- estimate_combined_progress (milestone 10, docs/tasklist.md item 10) --------
+
+
+def test_combined_progress_with_no_children_completed_and_none_running():
+    # Between children, or before the first one starts.
+    assert estimate_combined_progress(completed_children=0, total_children=3, current_child_progress=0.0) == 0.0
+
+
+def test_combined_progress_with_no_children_completed_and_one_running():
+    assert estimate_combined_progress(completed_children=0, total_children=2, current_child_progress=40.0) == 20.0
+
+
+def test_combined_progress_with_one_child_completed_and_one_running():
+    assert estimate_combined_progress(completed_children=1, total_children=2, current_child_progress=30.0) == 65.0
+
+
+def test_combined_progress_is_100_when_every_child_has_completed():
+    assert estimate_combined_progress(completed_children=3, total_children=3, current_child_progress=0.0) == 100.0
+
+
+def test_combined_progress_is_zero_with_no_children_at_all():
+    # Only reachable for a synthetic/malformed job with no child_job_ids --
+    # never divides by zero.
+    assert estimate_combined_progress(completed_children=0, total_children=0, current_child_progress=0.0) == 0.0
+
+
+# --- estimate_combined_eta: branch 1 -- zero children completed -----------------
+
+
+def test_combined_eta_zero_completed_uses_the_running_childs_own_eta_when_available():
+    eta_seconds, confidence = estimate_combined_eta(
+        completed_children=0,
+        children_not_yet_started=1,
+        current_child_eta_seconds=42.0,
+        current_child_eta_confidence="medium",
+        average_child_duration=None,
+    )
+    assert eta_seconds == 42.0
+    # Mirrors the running child's own confidence -- never upgraded/downgraded.
+    assert confidence == "medium"
+
+
+def test_combined_eta_zero_completed_and_no_running_childs_eta_is_none_low():
+    # Never fabricated from zero completed runs, per the spec's own
+    # explicit instruction (NFR-3 at the aggregate level).
+    eta_seconds, confidence = estimate_combined_eta(
+        completed_children=0,
+        children_not_yet_started=2,
+        current_child_eta_seconds=None,
+        current_child_eta_confidence="low",
+        average_child_duration=None,
+    )
+    assert eta_seconds is None
+    assert confidence == "low"
+
+
+def test_combined_eta_zero_completed_ignores_an_irrelevant_average_child_duration():
+    # Even if a caller mistakenly passed a non-None average (shouldn't
+    # happen with 0 completed children), the zero-completed branch must
+    # never use it -- only the running child's own eta_seconds counts.
+    eta_seconds, confidence = estimate_combined_eta(
+        completed_children=0,
+        children_not_yet_started=1,
+        current_child_eta_seconds=None,
+        current_child_eta_confidence="low",
+        average_child_duration=999.0,
+    )
+    assert eta_seconds is None
+    assert confidence == "low"
+
+
+# --- estimate_combined_eta: branch 2 -- >=1 child completed ---------------------
+
+
+def test_combined_eta_at_least_one_completed_uses_running_childs_own_eta_plus_average_remaining():
+    # 1 completed (avg duration 10s), running child has its own eta_seconds
+    # (5s), 2 children not yet started -> 5 + 10*2 = 25.
+    eta_seconds, confidence = estimate_combined_eta(
+        completed_children=1,
+        children_not_yet_started=2,
+        current_child_eta_seconds=5.0,
+        current_child_eta_confidence="high",
+        average_child_duration=10.0,
+    )
+    assert eta_seconds == 25.0
+    assert confidence == "high"  # mirrors the running child's own confidence
+
+
+def test_combined_eta_at_least_one_completed_falls_back_to_average_duration_when_no_running_eta():
+    # 1 completed (avg duration 10s), no per-child estimate available for
+    # the currently-running child yet -> current_or_avg_remaining falls
+    # back to the average itself: 10 + 10*1 = 20.
+    eta_seconds, confidence = estimate_combined_eta(
+        completed_children=1,
+        children_not_yet_started=1,
+        current_child_eta_seconds=None,
+        current_child_eta_confidence="low",
+        average_child_duration=10.0,
+    )
+    assert eta_seconds == 20.0
+    assert confidence == "medium"
+
+
+def test_combined_eta_all_children_completed_has_zero_not_yet_started_term():
+    # All completed -- combined_eta collapses to just the fallback term
+    # (no running child, nothing left to project).
+    eta_seconds, confidence = estimate_combined_eta(
+        completed_children=3,
+        children_not_yet_started=0,
+        current_child_eta_seconds=None,
+        current_child_eta_confidence="low",
+        average_child_duration=12.0,
+    )
+    assert eta_seconds == 12.0
+    assert confidence == "medium"

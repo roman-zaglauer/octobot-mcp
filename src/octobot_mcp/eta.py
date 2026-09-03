@@ -1,9 +1,17 @@
 """Pure ETA estimation for backtest/compare_strategies jobs (milestone 9,
-docs/tasklist.md item 9).
+docs/tasklist.md item 9; extended by milestone 10, docs/tasklist.md item 10).
 
-Implements ONLY steps 1-6 of docs/specs/octobot-mcp-tool-spec.md's "ETA
-estimation algorithm" section -- single-job ETA. Step 7 (`compare_strategies`'
-combined ETA across children) is milestone 10's job, not this module's.
+Milestone 9 implemented steps 1-6 of docs/specs/octobot-mcp-tool-spec.md's
+"ETA estimation algorithm" section -- single-job ETA, wired into a real
+`JobRecord` by `octobot_mcp.jobs.JobStore.record_watcher_tick`. Milestone 10
+adds step 7 (`compare_strategies`' combined progress/ETA across children):
+`estimate_combined_progress`/`estimate_combined_eta` below, both still pure
+(plain numbers in, no `JobRecord`/`JobStore` dependency) so they are
+unit-testable the exact same direct way as `estimate_eta` itself, per that
+milestone's own explicit instruction. The `JobRecord`-touching glue that
+gathers a `compare_strategies` job's children and calls these two functions
+lives in `octobot_mcp.tools.jobs` (`get_job_status`/`list_jobs`, computed
+fresh at read time -- see that module's docstring for why).
 
 This module is intentionally pure: no I/O, no `ctx`, nothing MCP-specific.
 `estimate_eta` takes only a samples sequence and the caller's own "current
@@ -166,3 +174,81 @@ def estimate_eta(
     else:
         confidence = "medium"
     return eta_seconds, confidence
+
+
+def estimate_combined_progress(
+    *, completed_children: int, total_children: int, current_child_progress: float
+) -> float:
+    """Spec's `compare_strategies` combined progress formula (ETA step 7's
+    sibling, used by `get_job_status`/`list_jobs` for a `compare_strategies`
+    job):
+
+        combined_progress = ((completed_children * 100) + current_child_progress) / total_children
+
+    `current_child_progress` is the currently-running child's own
+    `progress_percent`, or `0.0` if no child is currently running (between
+    children, or before the first one starts) -- the caller's
+    responsibility to supply correctly, not this function's. `total_children
+    <= 0` (no children recorded yet) returns `0.0` rather than dividing by
+    zero -- an edge case only reachable for a synthetic/test job with no
+    `child_job_ids`, never a real `compare_strategies` job (which always has
+    at least 2, per `compare_strategies`'s own `len(configs) >= 2` check).
+    """
+    if total_children <= 0:
+        return 0.0
+    return ((completed_children * 100.0) + current_child_progress) / total_children
+
+
+def estimate_combined_eta(
+    *,
+    completed_children: int,
+    children_not_yet_started: int,
+    current_child_eta_seconds: float | None,
+    current_child_eta_confidence: EtaConfidence,
+    average_child_duration: float | None,
+) -> tuple[float | None, EtaConfidence]:
+    """Spec's ETA algorithm step 7: `compare_strategies`' combined ETA across children.
+
+    Two branches, exactly per spec (see docs/specs/octobot-mcp-tool-spec.md's
+    ETA section, step 7):
+
+    - **0 children completed yet**: `combined_eta = current_child_eta_seconds`
+      if available (i.e. not `None` -- a currently-running child that
+      already has its own confident-enough estimate), else `None` with
+      `"low"` confidence. Never fabricates a multi-child estimate from zero
+      completed runs (this is NFR-3's "no fabricated ETA" requirement,
+      applied at the aggregate level).
+    - **>=1 child completed**: `avg_child_duration = mean(finished_at -
+      started_at for completed children)` (passed in as
+      `average_child_duration`, already computed by the caller from real
+      `JobRecord` timestamps); `combined_eta =
+      current_child_eta_or_avg_remaining + average_child_duration *
+      children_not_yet_started`, where `current_child_eta_or_avg_remaining`
+      is the running child's own `eta_seconds` if available, else
+      `average_child_duration` itself (spec's own fallback for "no
+      per-child estimate yet, but we do have real completed-run history to
+      fall back on").
+
+    Confidence for the >=1-completed branch is this function's own call
+    (the spec's step 7 doesn't specify it): mirrors the currently-running
+    child's own `eta_confidence` when its `eta_seconds` was actually used
+    (by INV-2, a non-`None` `eta_seconds` never pairs with `"low"`
+    confidence, so this is never a fabricated upgrade); falls back to
+    `"medium"` when using `average_child_duration` instead -- grounded in
+    real completed-run data (not fabricated), but coarser than a live
+    per-child sample-based estimate.
+    """
+    if completed_children <= 0:
+        if current_child_eta_seconds is None:
+            return None, "low"
+        return current_child_eta_seconds, current_child_eta_confidence
+
+    if current_child_eta_seconds is not None:
+        current_or_avg_remaining = current_child_eta_seconds
+        confidence: EtaConfidence = current_child_eta_confidence
+    else:
+        current_or_avg_remaining = average_child_duration or 0.0
+        confidence = "medium"
+
+    combined_eta = current_or_avg_remaining + (average_child_duration or 0.0) * children_not_yet_started
+    return combined_eta, confidence

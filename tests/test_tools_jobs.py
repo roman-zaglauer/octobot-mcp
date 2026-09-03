@@ -8,6 +8,8 @@ Each handler asserts OctoBot is never called, proving these 3 tools make
 no HTTP (or Socket.IO) call at all.
 """
 
+import time
+
 import httpx2 as httpx
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -92,6 +94,131 @@ async def test_get_job_status_includes_sub_jobs_for_compare_strategies():
     assert result["sub_jobs"] == [
         {"job_id": child_a.job_id, "state": "running", "progress_percent": 0.0},
         {"job_id": child_b.job_id, "state": "queued", "progress_percent": 0.0},
+    ]
+
+
+@pytest.mark.anyio
+async def test_get_job_status_combined_progress_with_no_children_completed_and_one_running():
+    store = JobStore()
+    child_a = store.create_job("backtest")
+    child_b = store.create_job("backtest")
+    store.start(child_a.job_id)
+    child_a.progress_percent = 40.0
+    parent = store.create_job("compare_strategies", child_job_ids=[child_a.job_id, child_b.job_id])
+
+    result = await get_job_status(_no_octobot_calls_ctx(store), job_id=parent.job_id)
+    assert result["progress_percent"] == pytest.approx(20.0)
+
+
+@pytest.mark.anyio
+async def test_get_job_status_combined_progress_with_one_child_completed_and_one_running():
+    store = JobStore()
+    child_a = store.create_job("backtest")
+    child_b = store.create_job("backtest")
+    store.start(child_a.job_id)
+    store.complete(child_a.job_id, result={"report": {}, "trades": []})
+    store.start(child_b.job_id)
+    child_b.progress_percent = 30.0
+    parent = store.create_job("compare_strategies", child_job_ids=[child_a.job_id, child_b.job_id])
+
+    result = await get_job_status(_no_octobot_calls_ctx(store), job_id=parent.job_id)
+    assert result["progress_percent"] == pytest.approx(65.0)
+
+
+@pytest.mark.anyio
+async def test_get_job_status_combined_progress_is_100_when_every_child_has_completed():
+    store = JobStore()
+    child_a = store.create_job("backtest")
+    child_b = store.create_job("backtest")
+    for child in (child_a, child_b):
+        store.start(child.job_id)
+        store.complete(child.job_id, result={"report": {}, "trades": []})
+    parent = store.create_job("compare_strategies", child_job_ids=[child_a.job_id, child_b.job_id])
+
+    result = await get_job_status(_no_octobot_calls_ctx(store), job_id=parent.job_id)
+    assert result["progress_percent"] == pytest.approx(100.0)
+
+
+@pytest.mark.anyio
+async def test_get_job_status_combined_eta_zero_completed_uses_running_childs_own_eta():
+    store = JobStore()
+    child_a = store.create_job("backtest")
+    child_b = store.create_job("backtest")
+    store.start(child_a.job_id)
+    for elapsed, progress in [(0.0, 0.0), (2.0, 10.0), (4.0, 20.0), (6.0, 30.0)]:
+        store.record_watcher_tick(child_a.job_id, elapsed_seconds=elapsed, progress_percent=progress, error_count=0)
+    parent = store.create_job("compare_strategies", child_job_ids=[child_a.job_id, child_b.job_id])
+
+    result = await get_job_status(_no_octobot_calls_ctx(store), job_id=parent.job_id)
+    assert child_a.eta_seconds is not None  # sanity: the single-job estimate is confident
+    assert result["eta_seconds"] == pytest.approx(child_a.eta_seconds)
+    assert result["eta_confidence"] == child_a.eta_confidence
+
+
+@pytest.mark.anyio
+async def test_get_job_status_combined_eta_zero_completed_and_no_running_estimate_is_none_low():
+    store = JobStore()
+    child_a = store.create_job("backtest")
+    child_b = store.create_job("backtest")
+    store.start(child_a.job_id)  # running, but no samples recorded yet
+    parent = store.create_job("compare_strategies", child_job_ids=[child_a.job_id, child_b.job_id])
+
+    result = await get_job_status(_no_octobot_calls_ctx(store), job_id=parent.job_id)
+    assert result["eta_seconds"] is None
+    assert result["eta_confidence"] == "low"
+
+
+@pytest.mark.anyio
+async def test_get_job_status_combined_eta_projects_remaining_children_from_completed_average():
+    store = JobStore()
+    child_a = store.create_job("backtest")
+    child_b = store.create_job("backtest")
+    child_c = store.create_job("backtest")
+    store.start(child_a.job_id)
+    store.complete(child_a.job_id, result={"report": {}, "trades": []})
+    # Real (not epoch-relative) monotonic offsets -- an absolute low value
+    # like 0.0/10.0 would make _evict_stale_terminal_jobs (NFR-9) think
+    # this "completed" child finished hours ago and evict it on the very
+    # next create_job call below.
+    now = time.monotonic()
+    child_a.started_at_monotonic = now - 10.0
+    child_a.finished_at_monotonic = now  # completed duration: 10s
+    store.start(child_b.job_id)  # currently running, no own eta yet
+    parent = store.create_job(
+        "compare_strategies", child_job_ids=[child_a.job_id, child_b.job_id, child_c.job_id]
+    )
+
+    result = await get_job_status(_no_octobot_calls_ctx(store), job_id=parent.job_id)
+    # 1 completed (avg duration 10s) + running child has no own estimate yet
+    # (falls back to the average) + 1 not-yet-started child (child_c):
+    # 10 + 10*1 = 20.
+    assert result["eta_seconds"] == pytest.approx(20.0)
+    assert result["eta_confidence"] == "medium"
+
+
+@pytest.mark.anyio
+async def test_get_job_status_sub_jobs_reflects_live_per_child_state_mid_comparison():
+    store = JobStore()
+    child_a = store.create_job("backtest")
+    child_b = store.create_job("backtest")
+    store.start(child_a.job_id)
+    child_a.progress_percent = 55.0
+    parent = store.create_job("compare_strategies", child_job_ids=[child_a.job_id, child_b.job_id])
+
+    result = await get_job_status(_no_octobot_calls_ctx(store), job_id=parent.job_id)
+    assert result["sub_jobs"] == [
+        {"job_id": child_a.job_id, "state": "running", "progress_percent": 55.0},
+        {"job_id": child_b.job_id, "state": "queued", "progress_percent": 0.0},
+    ]
+
+    store.complete(child_a.job_id, result={"report": {}, "trades": []})
+    store.start(child_b.job_id)
+    child_b.progress_percent = 10.0
+
+    result = await get_job_status(_no_octobot_calls_ctx(store), job_id=parent.job_id)
+    assert result["sub_jobs"] == [
+        {"job_id": child_a.job_id, "state": "completed", "progress_percent": 100.0},
+        {"job_id": child_b.job_id, "state": "running", "progress_percent": 10.0},
     ]
 
 

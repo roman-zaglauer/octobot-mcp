@@ -286,10 +286,20 @@ class JobStore:
         mid-run stall -- real time advancing with no new sample -- is what
         actually triggers the staleness downgrade, not just a `samples`
         mutation.
+
+        Milestone 10 (docs/tasklist.md item 10, defense-in-depth per that
+        milestone's own judge review) adds a terminal-state guard: a
+        watcher loop calling this on an ALREADY-terminal job (e.g. one
+        force-cancelled by a racing `cancel()` call between two ticks) is
+        a no-op, returning the record as-is rather than mutating
+        `progress_percent`/`samples`/`errors`/`eta_seconds` on a record
+        that has already reached its final state.
         """
         job = self._jobs.get(job_id)
         if job is None:
             return None
+        if job.state in TERMINAL_STATES:
+            return job
         job.progress_percent = progress_percent
         if not job.samples or job.samples[-1][1] != progress_percent:
             job.samples.append((elapsed_seconds, progress_percent))

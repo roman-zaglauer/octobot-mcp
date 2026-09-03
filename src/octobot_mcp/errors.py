@@ -101,9 +101,24 @@ Milestone 8 (docs/tasklist.md item 8, the backtest watcher + `start_backtest`/
   this case.
 - `JobNotCompletedError` -- `get_job_result` was called before a job
   reached `state == "completed"` (spec's `JOB_NOT_COMPLETED` code).
-- `CompareStrategiesResultUnsupportedError` -- `get_job_result` was called
-  on a `compare_strategies` job, which milestone 8 does not implement
-  (docs/tasklist.md item 10).
+
+Milestone 8 also added a placeholder `CompareStrategiesResultUnsupportedError`
+for `get_job_result` on a `compare_strategies` job, since nothing yet
+created one; milestone 10 (below) replaces that placeholder with the real
+`compare_strategies` implementation, so this class no longer exists.
+
+Milestone 10 (docs/tasklist.md item 10, `compare_strategies`) adds one more:
+- `CompareStrategiesStartFailedError` -- `compare_strategies` was given
+  fewer than 2 `configs`, or one of its per-config entries failed the same
+  mode/field validation `start_backtest` itself performs (an unknown
+  `mode`, a missing required field for that mode, or an unrecognized field
+  name) -- always raised synchronously, before any child or parent job is
+  created, naming the offending `configs[<index>]` so the caller can tell
+  which entry was invalid. Wraps the underlying `BacktestStartFailedError`
+  (or, for an unexpected field name, the raw `TypeError` from the mode
+  builder) rather than reusing that error type directly, so a caller can
+  tell "one of my `compare_strategies` configs was invalid" apart from "my
+  plain `start_backtest` call was invalid."
 """
 
 from __future__ import annotations
@@ -300,15 +315,14 @@ class JobNotCompletedError(OctoBotAPIError):
     """
 
 
-class CompareStrategiesResultUnsupportedError(OctoBotAPIError):
-    """`get_job_result` was called on a `kind: "compare_strategies"` job.
+class CompareStrategiesStartFailedError(OctoBotAPIError):
+    """`compare_strategies` was given an invalid `configs` list (milestone 10).
 
-    `compare_strategies` itself is not implemented until docs/tasklist.md
-    item 10 (milestone 8 only wires `start_backtest`/`get_job_result` for
-    `kind: "backtest"` jobs) -- no tool in this milestone creates a
-    `compare_strategies` job outside of a test's own synthetic
-    `JobStore.create_job(...)` call, so this should be practically
-    unreachable in real usage today. Exists so such a job's result is
-    never silently misreported using the `backtest` shape rather than
-    failing loud.
+    Raised synchronously, before any job (parent or child) is created --
+    same philosophy as `BacktestStartFailedError`'s own local-validation
+    branch. Covers `len(configs) < 2` and any per-config entry that fails
+    `start_backtest`'s own mode/field validation (wrapping the resulting
+    `BacktestStartFailedError`/`TypeError`), with the offending
+    `configs[<index>]` named in the message. See
+    `octobot_mcp.tools.backtesting.compare_strategies`'s docstring.
     """
