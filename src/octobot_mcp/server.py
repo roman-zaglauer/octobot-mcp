@@ -5,13 +5,20 @@ MCP client (e.g. Claude Code) launches this process and communicates over
 its stdin/stdout. There is no network listener and no MCP-level
 authentication.
 
-Milestone 1 registers zero tools. Later milestones (see docs/tasklist.md)
-add the OctoBot HTTP client and tools one at a time.
+Milestone 3 (see docs/tasklist.md item 3) registers this server's first
+tools: the read-only Tier-A JSON tools in `octobot_mcp.tools`. The single
+`httpx2.AsyncClient` those tools use is built once, at startup, by
+`octobot_mcp.context.app_lifespan` and threaded into every tool call via
+the MCP SDK's lifespan mechanism (NFR-11) -- never a module-level global.
 """
 
 from mcp.server import MCPServer
 
-mcp = MCPServer("OctoBot")
+from octobot_mcp.context import app_lifespan
+from octobot_mcp.tools import register_all
+
+mcp = MCPServer("OctoBot", lifespan=app_lifespan)
+register_all(mcp)
 
 
 def main() -> None:
