@@ -153,6 +153,7 @@ from mcp.server.mcpserver.context import Context
 
 from octobot_mcp.client import request_json
 from octobot_mcp.context import get_client, get_job_store
+from octobot_mcp.eta import WATCHER_INTERVAL_SECONDS
 from octobot_mcp.errors import (
     BacktestStartFailedError,
     CompareStrategiesResultUnsupportedError,
@@ -171,7 +172,11 @@ from octobot_mcp.tools._shared import with_error_handling
 #: NFR-2: the watcher's fixed polling interval, named so it is easy to
 #: tune independently of everything else. Deliberately far coarser than
 #: OctoBot's own 50ms UI cadence (ADR-0002) -- see the module docstring.
-WATCHER_INTERVAL_SECONDS = 1.5
+#: Re-exported here from `octobot_mcp.eta` (milestone 9, docs/tasklist.md
+#: item 9) rather than defined locally: that module's staleness check
+#: (`STALENESS_MULTIPLE * WATCHER_INTERVAL_SECONDS`) must always use the
+#: exact same interval this watcher loop actually ticks on, so there is a
+#: single canonical definition rather than two hand-kept-in-sync copies.
 
 #: NFR-5: Socket.IO connect timeout (distinct from `client.py`'s 10s REST
 #: timeout, which governs plain HTTP calls only).

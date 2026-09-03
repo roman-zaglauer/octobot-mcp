@@ -27,7 +27,12 @@ running job's cancellation once OctoBot's stop action has been called),
 and `append_error` (a small generic error-string appender both of the
 above build on) -- plus `track_watcher_task`, which is not a state-machine
 mutator at all but exists to solve a real asyncio correctness problem: see
-its own docstring.
+its own docstring. Milestone 9 (docs/tasklist.md item 9) completes
+`record_watcher_tick`'s own milestone-8 placeholder by having it call the
+pure `octobot_mcp.eta.estimate_eta`/`bound_samples` functions to actually
+compute `eta_seconds`/`eta_confidence` and bound `samples` -- this module
+still does not talk to OctoBot/Socket.IO/HTTP itself; `octobot_mcp.eta` is
+equally free of any such I/O.
 """
 
 from __future__ import annotations
@@ -40,6 +45,8 @@ from asyncio import Lock
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
+
+from octobot_mcp.eta import bound_samples, estimate_eta
 
 _logger = logging.getLogger(__name__)
 
@@ -73,9 +80,10 @@ class JobRecord:
     `finished_at_*` are `None` until the job actually reaches `"running"`/
     a terminal state.
 
-    `eta_seconds`/`eta_confidence`/`samples` exist now with milestone-9-safe
-    defaults (`None`/`"low"`/empty deque) -- their real computation (the ETA
-    heuristic) is milestone 9's job, not this one.
+    `eta_seconds`/`eta_confidence`/`samples` default to `None`/`"low"`/an
+    empty deque until a job actually starts running; `JobStore.
+    record_watcher_tick` (milestone 9, docs/tasklist.md item 9) is what
+    keeps them meaningful thereafter, via `octobot_mcp.eta.estimate_eta`.
     """
 
     job_id: str
@@ -255,17 +263,29 @@ class JobStore:
         progress_percent)` is appended to `samples` only if
         `progress_percent` changed from the last recorded sample (dedup --
         avoids overweighting periods where OctoBot hasn't updated progress
-        yet; milestone 9's ETA algorithm is the actual consumer of
-        `samples`). OctoBot's own backtesting-error count (`error_count`,
-        confirmed via source to be a raw int -- `bot_logging.
+        yet), then bounded per `octobot_mcp.eta.bound_samples` (spec's ETA
+        step 1: last 20 entries or last 60 seconds of elapsed span,
+        whichever is fewer). OctoBot's own backtesting-error count
+        (`error_count`, confirmed via source to be a raw int -- `bot_logging.
         get_backtesting_errors_count()` -- not a list of per-error
         messages, unlike this record's own `errors: list[str]` field) is
         recorded via `append_error` as one summarizing string, deduped the
         same way `append_error` dedupes any other message.
 
-        `eta_seconds`/`eta_confidence` are deliberately left untouched
-        here: computing them is milestone 9's job, not this one's (they
-        stay at `JobRecord`'s milestone-7-safe defaults, `None`/`"low"`).
+        `eta_seconds`/`eta_confidence` are (re)computed on every tick via
+        `octobot_mcp.eta.estimate_eta(job.samples, elapsed_seconds)` --
+        milestone 9 (docs/tasklist.md item 9), completing what this method
+        deliberately left as a placeholder in milestone 8. `elapsed_seconds`
+        (this tick's own watcher-loop-clock value, the same one used to
+        build the sample tuple above) is passed as `estimate_eta`'s
+        `current_elapsed` -- deliberately NOT `job.elapsed_seconds()`,
+        which is timed from job *creation* rather than from when the
+        watcher started watching; mixing those two clocks would make the
+        staleness check (step 2) subtly wrong. Called even when no new
+        sample was appended this tick (e.g. progress unchanged) so that a
+        mid-run stall -- real time advancing with no new sample -- is what
+        actually triggers the staleness downgrade, not just a `samples`
+        mutation.
         """
         job = self._jobs.get(job_id)
         if job is None:
@@ -273,6 +293,8 @@ class JobStore:
         job.progress_percent = progress_percent
         if not job.samples or job.samples[-1][1] != progress_percent:
             job.samples.append((elapsed_seconds, progress_percent))
+            bound_samples(job.samples)
+        job.eta_seconds, job.eta_confidence = estimate_eta(job.samples, elapsed_seconds)
         if error_count > 0:
             self.append_error(
                 job_id,

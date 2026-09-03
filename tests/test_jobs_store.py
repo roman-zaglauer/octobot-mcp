@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from octobot_mcp.eta import STALENESS_MULTIPLE, WATCHER_INTERVAL_SECONDS
 from octobot_mcp.jobs import (
     JOB_RETENTION_CAP,
     JOB_TTL_SECONDS,
@@ -276,3 +277,112 @@ def test_eviction_keeps_terminal_jobs_within_ttl_and_under_cap():
     store.create_job("backtest")  # trigger eviction; well within TTL and cap
 
     assert store.get(job.job_id) is not None
+
+
+# --- milestone 9: record_watcher_tick wires eta_seconds/eta_confidence ----------
+
+
+def test_record_watcher_tick_sets_eta_fields_from_the_estimator():
+    store = JobStore()
+    job = store.create_job("backtest")
+    store.start(job.job_id)
+
+    store.record_watcher_tick(job.job_id, elapsed_seconds=0.0, progress_percent=0.0, error_count=0)
+    assert job.eta_seconds is None
+    assert job.eta_confidence == "low"
+
+    for i in range(1, 12):
+        store.record_watcher_tick(
+            job.job_id, elapsed_seconds=float(i * 4), progress_percent=float(i * 4) * 2.0, error_count=0
+        )
+
+    # 12 samples (including t=0), span 44s, steady rate -- should now be a
+    # confident, numeric estimate, not the milestone-7/8 placeholder default.
+    assert job.eta_seconds is not None
+    assert job.eta_confidence == "high"
+
+
+def test_record_watcher_tick_uses_this_ticks_own_elapsed_not_job_elapsed_seconds_for_staleness():
+    """Simulates a job that sat queued for a long real-world time before its
+    watcher actually started ticking -- `job.elapsed_seconds()` (timed from
+    job *creation*) is already large -- while the watcher's own per-tick
+    `elapsed_seconds` values (timed from when watching itself started,
+    i.e. from Socket.IO connect) are still small and healthy.
+    `record_watcher_tick`'s staleness check must follow the watcher's own
+    clock (the `elapsed_seconds` argument), never `job.elapsed_seconds()`
+    -- using the latter would wrongly treat this healthy, actively-ticking
+    job as already stale.
+    """
+    store = JobStore()
+    job = store.create_job("backtest")
+    store.start(job.job_id)
+    # Simulate a long queueing delay between creation and the watcher
+    # actually starting to tick, without a real `time.sleep`.
+    job.created_at_monotonic -= 30.0
+    assert job.elapsed_seconds() > STALENESS_MULTIPLE * WATCHER_INTERVAL_SECONDS
+
+    # Watcher's own clock: three ticks close together (~1.5s apart, the
+    # real watcher cadence), healthy steadily-advancing progress.
+    store.record_watcher_tick(job.job_id, elapsed_seconds=0.0, progress_percent=10.0, error_count=0)
+    store.record_watcher_tick(job.job_id, elapsed_seconds=1.5, progress_percent=20.0, error_count=0)
+    store.record_watcher_tick(job.job_id, elapsed_seconds=3.0, progress_percent=30.0, error_count=0)
+
+    # Not stale by the watcher's own clock (staleness there is ~1.5s) --
+    # using job.elapsed_seconds() instead would have forced eta_seconds to
+    # None here, since that clock alone already exceeds the staleness
+    # threshold relative to the last sample's elapsed value.
+    assert job.eta_seconds is not None
+
+
+def test_record_watcher_tick_forces_stale_eta_to_none_low_on_a_mid_run_stall():
+    store = JobStore()
+    job = store.create_job("backtest")
+    store.start(job.job_id)
+
+    for i in range(11):
+        store.record_watcher_tick(
+            job.job_id, elapsed_seconds=float(i * 4), progress_percent=float(i * 4) * 2.0, error_count=0
+        )
+    assert job.eta_confidence == "high"
+
+    # No new sample arrives (progress unchanged), but real time (this
+    # tick's own elapsed_seconds) keeps advancing well past the staleness
+    # threshold -- the job stays "running" throughout.
+    store.record_watcher_tick(job.job_id, elapsed_seconds=40.0 + 20.0, progress_percent=80.0, error_count=0)
+
+    assert job.state == "running"
+    assert job.eta_seconds is None
+    assert job.eta_confidence == "low"
+
+
+def test_record_watcher_tick_bounds_samples_to_max_entries():
+    store = JobStore()
+    job = store.create_job("backtest")
+    store.start(job.job_id)
+
+    for i in range(30):
+        store.record_watcher_tick(
+            job.job_id, elapsed_seconds=float(i), progress_percent=float(i + 1), error_count=0
+        )
+
+    assert len(job.samples) == 20
+    assert job.samples[0] == (10.0, 11.0)
+    assert job.samples[-1] == (29.0, 30.0)
+
+
+def test_record_watcher_tick_bounds_samples_to_max_window_seconds():
+    store = JobStore()
+    job = store.create_job("backtest")
+    store.start(job.job_id)
+
+    # 10 samples, 15s apart -- span reaches 135s, well over the 60s bound,
+    # but each individual progress step is distinct so dedup never blocks
+    # any of them; only 20-entry/60s bounding trims the deque.
+    for i in range(10):
+        store.record_watcher_tick(
+            job.job_id, elapsed_seconds=float(i * 15), progress_percent=float(i + 1) * 5.0, error_count=0
+        )
+
+    newest_elapsed = job.samples[-1][0]
+    assert all(newest_elapsed - elapsed <= 60.0 for elapsed, _ in job.samples)
+    assert (0.0, 5.0) not in job.samples
