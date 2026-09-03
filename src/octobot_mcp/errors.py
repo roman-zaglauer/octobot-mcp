@@ -89,6 +89,21 @@ connectivity failure:
   the in-memory job store has no record of. Per ADR-0002's risk table, this
   is an *expected* outcome after a server restart (the job store is
   process-lifetime only, never persisted), not a bug -- the message says so.
+
+Milestone 8 (docs/tasklist.md item 8, the backtest watcher + `start_backtest`/
+`get_job_result`) adds four more:
+- `BacktestStartFailedError` -- `start_backtest` failed to submit a run to
+  OctoBot (spec's `BACKTEST_START_FAILED` code), or failed local input
+  validation before ever reaching OctoBot.
+- `MissingExchangeIdError` -- `start_backtest(mode="current_bot_data")`'s
+  `exchange_id` doesn't match a currently configured exchange (spec's
+  `MISSING_EXCHANGE_ID` code), OctoBot's own confirmed named exception for
+  this case.
+- `JobNotCompletedError` -- `get_job_result` was called before a job
+  reached `state == "completed"` (spec's `JOB_NOT_COMPLETED` code).
+- `CompareStrategiesResultUnsupportedError` -- `get_job_result` was called
+  on a `compare_strategies` job, which milestone 8 does not implement
+  (docs/tasklist.md item 10).
 """
 
 from __future__ import annotations
@@ -240,4 +255,60 @@ class JobNotFoundError(OctoBotAPIError):
     nothing across restarts), not a bug; the message raised alongside this
     exception says so explicitly. Raised by
     `octobot_mcp.tools.jobs.get_job_status`/`cancel_job`.
+    """
+
+
+class BacktestStartFailedError(OctoBotAPIError):
+    """`start_backtest` failed to start a run (spec's `BACKTEST_START_FAILED` code), milestone 8.
+
+    Wraps OctoBot's own error text from a failed `POST /backtesting` start
+    action (confirmed against source `models/backtesting.py::
+    _start_backtesting`: its only non-raising failure path returns
+    `(False, <message>)`, surfaced by the controller as an HTTP 500 whose
+    body is that plain-text message -- see
+    `octobot_mcp.tools.backtesting`'s module docstring), or a local
+    input-validation failure (an unknown `mode`, or `data_files` mode's
+    required `files` list omitted) caught before any OctoBot call is made
+    at all.
+    """
+
+
+class MissingExchangeIdError(OctoBotAPIError):
+    """`start_backtest(mode="current_bot_data")` was given an unrecognized `exchange_id`.
+
+    Distinct from the generic `BacktestStartFailedError`: confirmed against
+    source (`Services/Interfaces/web_interface/errors.py::MissingExchangeId`,
+    `models/trading.py::ensure_valid_exchange_id`, which raises it whenever
+    `octobot_trading.api.get_exchange_manager_from_exchange_id(exchange_id)`
+    raises a `KeyError`) as OctoBot's own named exception for exactly this
+    case. The controller surfaces it as an HTTP 500 whose body is the
+    literal string `MissingExchangeId.EXPLANATION` -- this tool matches
+    that exact text to raise this instead of the generic error, so an
+    agent can tell "bad exchange_id" apart from any other start failure.
+    See `octobot_mcp.tools.backtesting.start_backtest`'s docstring for how
+    `exchange_id` values are actually obtained (`get_exchange_details`'s
+    `exchange_id` field).
+    """
+
+
+class JobNotCompletedError(OctoBotAPIError):
+    """`get_job_result` was called on a job that has not reached `state == "completed"` (spec's `JOB_NOT_COMPLETED` code).
+
+    Names the job's current state in the message. Never returns partial
+    results, even if OctoBot itself would technically serve a report for
+    an in-progress or already-failed/cancelled run.
+    """
+
+
+class CompareStrategiesResultUnsupportedError(OctoBotAPIError):
+    """`get_job_result` was called on a `kind: "compare_strategies"` job.
+
+    `compare_strategies` itself is not implemented until docs/tasklist.md
+    item 10 (milestone 8 only wires `start_backtest`/`get_job_result` for
+    `kind: "backtest"` jobs) -- no tool in this milestone creates a
+    `compare_strategies` job outside of a test's own synthetic
+    `JobStore.create_job(...)` call, so this should be practically
+    unreachable in real usage today. Exists so such a job's result is
+    never silently misreported using the `backtest` shape rather than
+    failing loud.
     """

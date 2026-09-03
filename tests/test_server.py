@@ -12,14 +12,18 @@ the non-destructive profile write tools `create_profile`/`update_profile`/
 confirm-gated tools (ADR-0003), `delete_profile`/`convert_profile_to_live`;
 milestone 7 (item 7) adds the job store scaffolding's 3 tools,
 `get_job_status`/`list_jobs`/`cancel_job` (none confirm-gated, none making
-any HTTP/Socket.IO call -- they operate purely on the in-memory job store).
+any HTTP/Socket.IO call -- they operate purely on the in-memory job store);
+milestone 8 (item 8) adds `start_backtest`/`get_job_result`, the tools that
+finally wire the job store to a real OctoBot backtest run via the
+Socket.IO progress watcher (neither confirm-gated: `start_backtest` starts
+a simulation, `get_job_result` is read-only).
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
 `test_tools_portfolio.py`/`test_tools_exchanges.py`/`test_tools_profiles.py`/
-`test_tools_profiles_gated.py`/`test_tools_jobs.py` for per-tool behavior and
-`test_server_tools_integration.py` for an end-to-end call through this same
-`mcp` wiring.
+`test_tools_profiles_gated.py`/`test_tools_jobs.py`/`test_tools_backtesting.py`
+for per-tool behavior and `test_server_tools_integration.py` for an
+end-to-end call through this same `mcp` wiring.
 
 Since milestone 3 also wires `mcp`'s real `app_lifespan` (NFR-11) into
 this module-level `mcp` instance, connecting a `Client` to it now runs
@@ -33,7 +37,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_7_TOOL_NAMES = {
+EXPECTED_MILESTONE_8_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -55,6 +59,8 @@ EXPECTED_MILESTONE_7_TOOL_NAMES = {
     "get_job_status",
     "list_jobs",
     "cancel_job",
+    "start_backtest",
+    "get_job_result",
 }
 
 
@@ -71,9 +77,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_7_tools(client: Client):
+async def test_server_lists_the_milestone_8_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_7_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_8_TOOL_NAMES
 
 
 @pytest.mark.anyio

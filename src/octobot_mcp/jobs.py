@@ -17,18 +17,31 @@ and mutates records this store already holds.
 Reachability (NFR-11): a `JobStore` instance lives on `AppContext.jobs`
 (see `octobot_mcp.context`), built once at server startup by
 `app_lifespan` and threaded into every tool call the same way the shared
-HTTP client is -- never a module-level global reached by name. A future
-milestone 8 tool reaches the lock via `get_job_store(ctx).backtest_execution_lock`.
+HTTP client is -- never a module-level global reached by name. Milestone 8
+(docs/tasklist.md item 8, `octobot_mcp.tools.backtesting`) reaches the lock
+via `get_job_store(ctx).backtest_execution_lock` from its background
+watcher task, and adds three more `JobStore` mutator methods alongside
+`start`/`complete`/`fail`/`cancel` -- `record_watcher_tick` (one watcher
+tick's progress/error-count update), `confirm_cancelled` (finalizing a
+running job's cancellation once OctoBot's stop action has been called),
+and `append_error` (a small generic error-string appender both of the
+above build on) -- plus `track_watcher_task`, which is not a state-machine
+mutator at all but exists to solve a real asyncio correctness problem: see
+its own docstring.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 import uuid
 from asyncio import Lock
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
+
+_logger = logging.getLogger(__name__)
 
 JobKind = Literal["backtest", "compare_strategies"]
 JobState = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -102,15 +115,20 @@ class JobStore:
     Owns `backtest_execution_lock` (ADR-0002's process-wide `asyncio.Lock`
     reflecting OctoBot's one-run-at-a-time constraint) so it is reachable
     the same dependency-injected way as everything else (NFR-11): via
-    `octobot_mcp.context.get_job_store(ctx).backtest_execution_lock`. Nothing
-    in this milestone acquires it around a real OctoBot call yet -- that is
-    milestone 8's job; this milestone only makes sure the lock exists and is
-    structurally in place.
+    `octobot_mcp.context.get_job_store(ctx).backtest_execution_lock`.
+    Milestone 8's `octobot_mcp.tools.backtesting` background watcher
+    acquires it around the real OctoBot start/watch/stop sequence, always
+    via `async with`, whose `__aexit__` guarantees release on every code
+    path -- the functional equivalent of an explicit `try/finally:
+    lock.release()` (INV-1).
     """
 
     def __init__(self) -> None:
         self._jobs: dict[str, JobRecord] = {}
         self.backtest_execution_lock: Lock = Lock()
+        #: Strong references to in-flight watcher tasks, keyed by job_id.
+        #: See `track_watcher_task`'s docstring for why this exists.
+        self._watcher_tasks: dict[str, asyncio.Task] = {}
 
     def create_job(
         self, kind: JobKind, *, child_job_ids: list[str] | None = None
@@ -205,6 +223,124 @@ class JobStore:
         elif job.state == "running":
             job.cancel_requested = True
         return job
+
+    def confirm_cancelled(self, job_id: str) -> JobRecord | None:
+        """Finalize a running job's cancellation once OctoBot's stop action has been called.
+
+        Distinct from `cancel()`: that method is what a `cancel_job` tool
+        call uses to *request* cancellation (setting `cancel_requested` for
+        a `running` job, or transitioning a `queued` job to `cancelled`
+        directly since it never touched the lock). This method is what
+        milestone 8's watcher loop calls once it has actually noticed the
+        flag, told OctoBot to stop, and is ready to finalize the record
+        (spec's watcher step 5) -- a no-op (returns the record as-is) if
+        the job isn't `running` (e.g. called twice, or the job already
+        reached a different terminal state through some other path).
+        """
+        job = self._jobs.get(job_id)
+        if job is None or job.state != "running":
+            return job
+        job.state = "cancelled"
+        job.finished_at_monotonic = time.monotonic()
+        job.finished_at_wall = time.time()
+        return job
+
+    def record_watcher_tick(
+        self, job_id: str, *, elapsed_seconds: float, progress_percent: float, error_count: int
+    ) -> JobRecord | None:
+        """Apply one watcher-loop tick's `backtesting_status` payload to a running job.
+
+        Spec's "Background watcher" step 3: `progress_percent` is always
+        updated to the latest reported value; `(elapsed_seconds,
+        progress_percent)` is appended to `samples` only if
+        `progress_percent` changed from the last recorded sample (dedup --
+        avoids overweighting periods where OctoBot hasn't updated progress
+        yet; milestone 9's ETA algorithm is the actual consumer of
+        `samples`). OctoBot's own backtesting-error count (`error_count`,
+        confirmed via source to be a raw int -- `bot_logging.
+        get_backtesting_errors_count()` -- not a list of per-error
+        messages, unlike this record's own `errors: list[str]` field) is
+        recorded via `append_error` as one summarizing string, deduped the
+        same way `append_error` dedupes any other message.
+
+        `eta_seconds`/`eta_confidence` are deliberately left untouched
+        here: computing them is milestone 9's job, not this one's (they
+        stay at `JobRecord`'s milestone-7-safe defaults, `None`/`"low"`).
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        job.progress_percent = progress_percent
+        if not job.samples or job.samples[-1][1] != progress_percent:
+            job.samples.append((elapsed_seconds, progress_percent))
+        if error_count > 0:
+            self.append_error(
+                job_id,
+                f"OctoBot reported {error_count} error(s) during this backtesting run.",
+            )
+        return job
+
+    def append_error(self, job_id: str, message: str) -> JobRecord | None:
+        """Append one human-readable error string to a job's `errors` list.
+
+        Deduped against only the immediately-previous entry (not the whole
+        list), so a message that keeps recurring unchanged (e.g. the same
+        `record_watcher_tick` error-count string on repeated ticks) doesn't
+        grow `errors` unboundedly, while a genuinely new/different message
+        is never dropped. Used by `record_watcher_tick` above and by the
+        watcher's best-effort handling of a failed stop-backtesting call
+        during a cancel (which does not, by itself, fail the job -- the
+        record still transitions to `cancelled` via `confirm_cancelled`).
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        if not job.errors or job.errors[-1] != message:
+            job.errors.append(message)
+        return job
+
+    def track_watcher_task(self, job_id: str, task: "asyncio.Task") -> None:
+        """Keep a strong reference to a job's background watcher task for its lifetime.
+
+        `octobot_mcp.tools.backtesting.start_backtest` spawns the watcher
+        via `asyncio.create_task(...)` and must return immediately without
+        awaiting it (the whole point of the async job pattern, ADR-0002) --
+        but a bare `asyncio.create_task(...)` result with no reference kept
+        anywhere is a well-known asyncio gotcha: the task object can be
+        garbage-collected mid-flight, silently cancelling it. This store
+        outlives the tool call that created it, so it is where that
+        reference lives instead.
+
+        Also attaches a done-callback that (a) removes the task from this
+        registry once it finishes, so this dict doesn't grow unboundedly
+        over a long-lived session, and (b) logs (at ERROR, with a
+        traceback) any exception that escaped the watcher's own
+        try/except/finally -- this should never normally happen (INV-1's
+        `state="failed"` path is the intended way a watcher failure
+        surfaces), so if this callback ever logs anything, that is itself
+        a bug in the watcher worth investigating, not an expected outcome.
+        The task itself is never exposed through any tool's JSON output
+        (e.g. `get_job_status`) -- it lives only in this internal dict.
+        """
+        self._watcher_tasks[job_id] = task
+
+        def _on_done(finished_task: "asyncio.Task", *, _job_id: str = job_id) -> None:
+            self._watcher_tasks.pop(_job_id, None)
+            if finished_task.cancelled():
+                return
+            exc = finished_task.exception()
+            if exc is not None:
+                _logger.error(
+                    "Watcher task for job %s exited with an unhandled exception "
+                    "(this should have been caught by the watcher's own "
+                    "try/except -- this is a bug in the watcher itself, not an "
+                    "expected outcome): %r",
+                    _job_id,
+                    exc,
+                    exc_info=exc,
+                )
+
+        task.add_done_callback(_on_done)
 
     def _evict_stale_terminal_jobs(self) -> None:
         """NFR-9: evict terminal records past TTL, then past the retention cap.

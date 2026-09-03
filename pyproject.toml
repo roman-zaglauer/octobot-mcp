@@ -12,6 +12,14 @@ dependencies = [
     "mcp>=2.1.1,<3",
     "httpx2>=2.12.0,<3",
     "beautifulsoup4>=4.12,<5",
+    # Milestone 8 (docs/tasklist.md item 8): the backtest progress watcher's
+    # Socket.IO client (ADR-0002). Compatibility with OctoBot's bundled
+    # Flask-SocketIO was the milestone's own first verification task --
+    # python-socketio 5.16.4 round-tripped `backtesting_status` cleanly
+    # against the live OctoBot 2.1.1 test instance (Engine.IO protocol v4)
+    # with no version pinning/adjustment needed; see
+    # `octobot_mcp.tools.backtesting`'s module docstring for the detail.
+    "python-socketio[asyncio_client]>=5.11,<6",
 ]
 
 [project.optional-dependencies]
