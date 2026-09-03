@@ -14,6 +14,18 @@ trace" requirement.
 
 `with_error_handling` is the one place that translation happens, so no
 individual tool repeats the same try/except.
+
+Milestone 6 (docs/tasklist.md item 6) adds `require_confirmation`, the
+shared confirm-gating helper for ADR-0003's destructive/high-risk tools
+(`delete_profile`/`convert_profile_to_live` are its first two consumers;
+milestone 12's `update_exchange_credentials`/`clear_*_history` tools reuse
+it unchanged). It is a deliberately different kind of "failure surfacing"
+than `with_error_handling` above: per ADR-0003, an unconfirmed call is not
+an error at all -- it is the tool doing exactly what was asked (checking)
+and reporting back a normal, structured refusal a calling agent can read
+and act on. A gated tool therefore calls `require_confirmation` and
+`return`s its result directly (never `raise`s it, and it is never passed
+through `with_error_handling`/`ToolError`).
 """
 
 from __future__ import annotations
@@ -58,3 +70,50 @@ def with_error_handling(func: F) -> F:
             raise ToolError(f"{type(exc).__name__}: {exc}") from exc
 
     return wrapper  # type: ignore[return-value]
+
+
+def require_confirmation(action: str, target: str, reason: str) -> dict[str, Any]:
+    """Build the structured refusal result for an unconfirmed gated tool call (ADR-0003).
+
+    The ONE shared implementation of ADR-0003's confirm-gating check, used
+    by every tool classified as destructive/high-risk (`delete_profile`/
+    `convert_profile_to_live` first, milestone 12's
+    `update_exchange_credentials`/`clear_*_history` tools later) so there is
+    no per-tool bespoke confirm-checking logic to get wrong.
+
+    Callers are responsible for the actual gate (`if confirm is not True:
+    return require_confirmation(...)`) -- this function only builds the
+    result, since whether `confirm` was satisfied is specific to each call
+    site's parameter.
+
+    Per ADR-0003, this is a NORMAL tool return value, not an error: a
+    calling tool function must `return` this dict directly rather than
+    `raise` anything, and it must never be routed through
+    `with_error_handling`/`ToolError` -- an unconfirmed call is the tool
+    correctly doing what was asked (checking), not a failure.
+
+    Args:
+        action: the tool/action name (e.g. `"delete_profile"`), echoed back
+            so the calling agent knows exactly what was refused.
+        target: the specific resource the action would apply to (e.g. a
+            `profile_id`), echoed back for the same reason.
+        reason: a human-readable explanation of why confirmation is
+            required for this specific action (e.g. "This permanently
+            deletes the profile and cannot be undone.").
+
+    Returns:
+        `{"confirmed": False, "action": action, "target": target, "reason":
+        reason, "message": <a human-readable summary combining all three
+        and telling the caller to re-issue the call with `confirm=true`>}`.
+    """
+    return {
+        "confirmed": False,
+        "action": action,
+        "target": target,
+        "reason": reason,
+        "message": (
+            f"{action} on {target!r} was NOT performed: confirmation is "
+            f"required. {reason} Re-issue this call with confirm=true to "
+            "proceed."
+        ),
+    }

@@ -49,6 +49,37 @@ docstrings) found is NOT reliably signalled by HTTP status alone:
   unknown id, so this tool must positively re-check the selection
   afterward rather than trust the response status -- see
   `octobot_mcp.tools.profiles.select_profile`'s docstring.
+
+Milestone 6 (docs/tasklist.md item 6, the confirm-gating helper and its
+first two consumers) adds two more, both gated behind `confirm=true`
+(ADR-0003) and only ever raised once the caller has already confirmed --
+the refusal path itself (`confirm` not `true`) is a normal tool return, not
+an error (see `octobot_mcp.tools._shared.require_confirmation`):
+- `ProfileDeleteRejectedError` -- `delete_profile` failed (spec's
+  `DELETE_REJECTED` code). Wraps OctoBot's own `(profile, err)` failure
+  string from `POST /profiles_management/remove` (confirmed against source:
+  `err` is either the literal string `"Can't remove the active profile"` or
+  a `ProfileRemovalError`'s text), or -- since that route's own 200 success
+  body is the same uninformative literal string `"Profile created"` copied
+  from the unrelated `duplicate` action (confirmed against source) -- this
+  tool re-checks via the same scrape `list_profiles`/`get_profile` use that
+  the profile is actually gone afterward, and raises this instead of
+  trusting the response status alone.
+- `ProfileConversionFailedError` -- `convert_profile_to_live` did not
+  actually select the requested profile after converting it. Not in the
+  original spec's error-code table: `GET /profiles_management/use_as_live`
+  (confirmed against source) always responds with an uninformative HTTP
+  302 redirect to `/profile` on the one code path that doesn't raise, so
+  this tool re-checks afterward (same scrape) that the profile is now
+  selected, rather than trusting the response status. Deliberately does
+  NOT also re-check the scrape's `profile_type` field: verified against
+  source, that field reflects a completely different OctoBot concept
+  (whether a real vs. simulated *trader* is enabled in the profile's own
+  config) than the `profile.profile_type` attribute this action actually
+  sets (`ProfileType.LIVE`, which has no rendered HTML representation to
+  scrape at all) -- see
+  `octobot_mcp.tools.profiles.convert_profile_to_live`'s docstring for the
+  full, source-verified explanation of this terminology collision.
 """
 
 from __future__ import annotations
@@ -154,4 +185,37 @@ class ProfileSelectionFailedError(OctoBotAPIError):
     `list_profiles`/`get_profile` use and raises this instead of trusting
     the response status. See
     `octobot_mcp.tools.profiles.select_profile`'s docstring.
+    """
+
+
+class ProfileDeleteRejectedError(OctoBotAPIError):
+    """`delete_profile` failed (spec's `DELETE_REJECTED` code), milestone 6.
+
+    Raised only after the caller has already confirmed (`confirm=true`) --
+    see `octobot_mcp.tools._shared.require_confirmation` for the unconfirmed
+    path, which is a normal return, not an exception. Wraps OctoBot's own
+    `(profile, err)` failure string from `POST /profiles_management/remove`
+    (confirmed against source `models/profiles.py::remove_profile`), or
+    reports that the profile is still present after a post-hoc re-scrape
+    despite a reported-success response -- see
+    `octobot_mcp.tools.profiles.delete_profile`'s docstring for why that
+    extra check exists.
+    """
+
+
+class ProfileConversionFailedError(OctoBotAPIError):
+    """`convert_profile_to_live` did not actually convert/select the profile.
+
+    Raised only after the caller has already confirmed (`confirm=true`) --
+    see `octobot_mcp.tools._shared.require_confirmation` for the unconfirmed
+    path, which is a normal return, not an exception. Not a status-code
+    failure: `GET /profiles_management/use_as_live` (verified against
+    source) always responds with an uninformative HTTP 302 redirect on its
+    one non-raising code path, so this tool re-checks afterward via the
+    same scrape `list_profiles`/`get_profile` use that the profile is now
+    selected. It does NOT re-check `profile_type: "LIVE"` this way -- that
+    field and the scrape's `profile_type` badge are two unrelated OctoBot
+    concepts that merely share a name; see
+    `octobot_mcp.tools.profiles.convert_profile_to_live`'s docstring for the
+    full source-verified explanation.
     """

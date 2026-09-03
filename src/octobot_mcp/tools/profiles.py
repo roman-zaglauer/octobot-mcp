@@ -143,13 +143,15 @@ from octobot_mcp.errors import (
     OctoBotMalformedResponseError,
     OctoBotServerError,
     OctoBotTimeoutError,
+    ProfileConversionFailedError,
+    ProfileDeleteRejectedError,
     ProfileImportFailedError,
     ProfileNotFoundError,
     ProfileScrapeContractBrokenError,
     ProfileSelectionFailedError,
     ProfileUpdateRejectedError,
 )
-from octobot_mcp.tools._shared import with_error_handling
+from octobot_mcp.tools._shared import require_confirmation, with_error_handling
 
 _PROFILES_SELECTOR_PATH = "/profiles_selector"
 
@@ -926,6 +928,253 @@ async def export_profile(ctx: Context, profile_id: str) -> Any:
     }
 
 
+# --- milestone 6: the first two confirm-gated profile tools (ADR-0003) ------
+
+
+@with_error_handling
+async def delete_profile(ctx: Context, profile_id: str, confirm: bool = False) -> Any:
+    """Permanently delete a profile. Confirm-gated (ADR-0003): irreversible.
+
+    If `confirm` is not exactly `true`, no OctoBot call is made at all --
+    this returns `require_confirmation`'s structured refusal (a normal
+    return, not an error) instead.
+
+    Once confirmed, maps to `POST /profiles_management/remove` with JSON
+    body `{"id": profile_id}` (confirmed against source
+    `controllers/configuration.py`'s `"remove"` action, which reads exactly
+    `flask.request.get_json()["id"]` -- the spec's documented body shape is
+    correct here, unlike `update_profile`'s in milestone 5).
+
+    **Two failure modes confirmed against source
+    (`models/profiles.py::remove_profile`), both surfaced as
+    `ProfileDeleteRejectedError`**:
+    - `profile_id` is the currently-selected/active profile: OctoBot itself
+      rejects this (`"Can't remove the active profile"`), returned as HTTP
+      400 with that exact string as the JSON body.
+    - `profile_id` names a profile whose removal a `ProfileRemovalError`
+      blocks (e.g. an in-use profile): also HTTP 400, wrapping that error's
+      text.
+    An unrecognized `profile_id` isn't checked by `remove_profile` before
+    this tool ever reaches OctoBot: it's rejected locally as
+    `ProfileNotFoundError` (via the same pre-fetched scrape used to look up
+    `name`, below) rather than let OctoBot's own uncaught `KeyError` produce
+    an HTTP 500.
+
+    **Extra safety check, not strictly required by OctoBot's own response
+    but added anyway**: OctoBot's 200 success body for this action is the
+    same uninformative literal string `"Profile created"` copied from the
+    unrelated `duplicate` action (confirmed against source) -- not
+    "Profile deleted" or anything that actually confirms removal. Given
+    that copy-paste bug, this tool re-checks via the same scrape
+    `list_profiles`/`get_profile` use that `profile_id` is genuinely gone
+    afterward, raising `ProfileDeleteRejectedError` (not trusting the 200)
+    if it is still present.
+
+    The profile's `name` is captured from a scrape taken *before* deletion
+    (per this tool's spec entry), since after a real deletion it can no
+    longer be found by scraping.
+
+    Output on success: `{"profile_id": str, "name": str, "deleted": true}`.
+    """
+    if confirm is not True:
+        return require_confirmation(
+            "delete_profile",
+            profile_id,
+            "This permanently deletes the profile and cannot be undone.",
+        )
+
+    client = get_client(ctx)
+    before = await _fetch_and_parse_profiles(client)
+    matched = next((profile for profile in before if profile["profile_id"] == profile_id), None)
+    if matched is None:
+        raise ProfileNotFoundError(f"No profile found with profile_id={profile_id!r}.")
+
+    response = await _request_raw(
+        client,
+        "POST",
+        "/profiles_management/remove",
+        json={"id": profile_id},
+    )
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} deleting "
+            f"profile_id={profile_id!r}: {_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise ProfileDeleteRejectedError(
+            f"OctoBot rejected deleting profile_id={profile_id!r}: {_extract_error_text(response)}"
+        )
+
+    after = await _fetch_and_parse_profiles(client)
+    if any(profile["profile_id"] == profile_id for profile in after):
+        raise ProfileDeleteRejectedError(
+            f"OctoBot reported success deleting profile_id={profile_id!r}, "
+            "but it is still present after re-scraping /profiles_selector "
+            "-- OctoBot's success response for this action is an "
+            "uninformative literal string ('Profile created', copy-pasted "
+            "from the unrelated 'duplicate' action; see this tool's "
+            "docstring), so this tool never trusts it alone."
+        )
+    return {"profile_id": profile_id, "name": matched["name"], "deleted": True}
+
+
+@with_error_handling
+async def convert_profile_to_live(ctx: Context, profile_id: str, confirm: bool = False) -> Any:
+    """Convert a profile to LIVE trading mode and select it. Confirm-gated (ADR-0003).
+
+    If `confirm` is not exactly `true`, no OctoBot call is made at all --
+    this returns `require_confirmation`'s structured refusal (a normal
+    return, not an error) instead.
+
+    Once confirmed, maps to `GET /profiles_management/use_as_live?profile_id=<id>`
+    (confirmed against source `controllers/configuration.py`'s
+    `"use_as_live"` action).
+
+    **Spec correction #1, verified against source and reproduced live**:
+    this route's one non-raising code path calls
+    `models.convert_to_live_profile(profile_id)` then
+    `models.select_profile(profile_id)`, flashes an HTML-only session
+    message, and returns `flask.redirect(flask.url_for("profile"))` -- an
+    HTTP 302 to `/profile` with no informative body at all, whether or not
+    the conversion actually took effect. This is the same
+    uninformative-GET-response category milestone 5 already found for
+    `duplicate` (also a bare success marker) and `select_profile` (a 200
+    that can silently mean "nothing changed"). Following the same pattern
+    `select_profile` established, this tool never trusts the response
+    status alone: it re-fetches via the same scrape `list_profiles`/
+    `get_profile` use afterward and raises `ProfileConversionFailedError`
+    if `profile_id` isn't selected there (see spec correction #2 for why
+    only `is_selected`, not `profile_type`, is re-checked this way).
+
+    **Spec correction #2 -- a genuine terminology collision in OctoBot's own
+    data model, found live and confirmed against source, NOT just a
+    misreading of this milestone's own instructions**: `is_selected`/
+    `profile_type` were expected to both be independently re-verifiable
+    post-hoc via the same scrape `list_profiles` uses (mirroring
+    `select_profile`'s pattern). `is_selected` is: the
+    `profile-overview-selected` CSS class this scrape already parses
+    reliably reflects `models.select_profile(profile_id)`'s effect.
+    `profile_type`, however, is NOT reverified here, because the scrape's
+    `profile_type` field (`list_profiles`/`get_profile`'s "LIVE"/
+    "SIMULATOR"/"UNKNOWN") and the `profile.profile_type` attribute
+    `models.convert_to_live_profile` actually sets are two unrelated
+    OctoBot concepts that merely share a confusingly similar name:
+    - The scrape's `profile_type` comes from the `badge-info` badge text,
+      which is the return value of `get_enabled_trader(profile)`
+      (confirmed against source `flask_util/context_processor.py`):
+      `"Real trading"` iff `trading_util.is_trader_enabled(profile.config)`,
+      else `"Simulated trading"` iff `is_trader_simulator_enabled`, else no
+      badge at all -- entirely about whether a real (vs. simulated)
+      *trader* is enabled in that profile's OWN trading config.
+    - `models.convert_to_live_profile` (confirmed against source
+      `models/profiles.py`) only does `profile.profile_type =
+      commons_enums.ProfileType.LIVE; profile.validate_and_save_config()`.
+      `octobot_commons.enums.ProfileType` (confirmed against source) has
+      exactly two members, `LIVE = "live"` and `BACKTESTING = "backtesting"`
+      -- there is no `SIMULATOR` member at all, and this attribute is never
+      rendered anywhere in `/profiles_selector`'s HTML (confirmed by reading
+      `components/config/profiles.html` and `context_processor.py`: neither
+      references `profile.profile_type`).
+
+    Concretely (reproduced live against a freshly-duplicated, default
+    SIMULATOR-trader profile): after a successful `convert_profile_to_live`
+    call, the scrape's `profile_type` for that profile is still
+    `"SIMULATOR"` -- `convert_to_live_profile` never touches the
+    trader-enabled config the badge reflects. Gating this tool's success on
+    `profile_type == "LIVE"` (as this milestone's own instructions
+    originally called for) would therefore make it report failure on
+    essentially every real invocation, which is worse than not checking it
+    at all. There is no OctoBot HTTP-visible signal (Tier A or B) this
+    server can use to independently confirm `profile.profile_type` flipped
+    -- an acknowledged, documented gap (the same category as
+    `update_profile`'s undeliverable `config` field from milestone 5), not
+    a silently-accepted assumption. This tool's `"profile_type": "LIVE"` in
+    its own output below is therefore an echo of what was requested (and,
+    per `convert_to_live_profile`'s unconditional, non-branching
+    implementation, reliably applied whenever this call doesn't raise --
+    see spec correction #3), not an independently re-scraped fact.
+
+    **Spec correction #3, on why a non-5xx response is nonetheless a
+    reasonably strong signal for the `profile_type` half specifically**:
+    unlike `remove_profile`'s check-and-return-`(result, err)` pattern,
+    `convert_to_live_profile`'s body (confirmed against source) has no
+    conditional branch that could skip the `profile.profile_type =
+    ProfileType.LIVE` assignment -- it either runs to completion (assigns,
+    then saves) or raises (propagating to the uncaught-500 path this tool
+    already classifies as `OctoBotServerError`). A non-5xx response
+    therefore does mean that assignment executed and was saved; the
+    remaining genuine uncertainty this tool resolves by re-checking is only
+    whether the immediately-following `models.select_profile(profile_id)`
+    call (a separate function with its own historically-silent-failure mode
+    for unknown ids, per `select_profile`'s docstring) actually took
+    effect -- which is exactly what the `is_selected` re-check above
+    verifies.
+
+    An exception raised inside OctoBot's own handling (e.g. an unrecognized
+    `profile_id`, which makes the underlying `get_profile()` raise) is not
+    caught by this route at all, so it propagates to OctoBot's global error
+    handler as an HTTP 500 -- classified here as `OctoBotServerError`, with
+    the `Content-Type: application/json` request-header hint (same
+    established technique as `duplicate`/`select_profile`/`export_profile`)
+    so that handler's message is readable JSON instead of an HTML page.
+
+    Output on success: `{"profile_id": str, "profile_type": "LIVE",
+    "selected": true}`.
+    """
+    if confirm is not True:
+        return require_confirmation(
+            "convert_profile_to_live",
+            profile_id,
+            "This converts the profile to LIVE trading mode and selects "
+            "it -- real orders may be placed against a real exchange "
+            "account.",
+        )
+
+    client = get_client(ctx)
+    response = await _request_raw(
+        client,
+        "GET",
+        "/profiles_management/use_as_live",
+        params={"profile_id": profile_id},
+        headers=_JSON_ERROR_HINT_HEADERS,
+    )
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} converting "
+            f"profile_id={profile_id!r} to LIVE: {_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot returned client error {response.status_code} converting "
+            f"profile_id={profile_id!r} to LIVE: {_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+
+    profiles = await _fetch_and_parse_profiles(client)
+    current = next((profile for profile in profiles if profile["profile_id"] == profile_id), None)
+    if current is None or not current["is_selected"]:
+        raise ProfileConversionFailedError(
+            f"OctoBot did not select profile_id={profile_id!r} as expected "
+            "after the request: "
+            + (
+                "the profile no longer appears in /profiles_selector at all."
+                if current is None
+                else f"is_selected={current['is_selected']!r}."
+            )
+            + " GET /profiles_management/use_as_live always responds with an "
+            "uninformative redirect (verified against source), so this tool "
+            "re-checks the resulting selection via the same scrape "
+            "list_profiles/get_profile use rather than trusting the "
+            "response status. (profile_type is deliberately NOT re-checked "
+            "this way -- see this function's docstring, 'spec correction #2', "
+            "for why the scrape's profile_type field cannot verify this "
+            "action's actual effect.)"
+        )
+    return {"profile_id": profile_id, "profile_type": "LIVE", "selected": True}
+
+
 def register(mcp: MCPServer) -> None:
     """Register this module's tools onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
     mcp.tool()(list_profiles)
@@ -934,3 +1183,5 @@ def register(mcp: MCPServer) -> None:
     mcp.tool()(update_profile)
     mcp.tool()(select_profile)
     mcp.tool()(export_profile)
+    mcp.tool()(delete_profile)
+    mcp.tool()(convert_profile_to_live)
