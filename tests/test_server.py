@@ -6,10 +6,12 @@ without spawning a subprocess.
 
 Milestone 1 registered zero tools; milestone 3 (docs/tasklist.md item 3)
 registered the first 10; milestone 4 (item 4) adds the Tier-B profile
-scrape adapter's `list_profiles`/`get_profile`. Each milestone updates
-this same assertion to the new -- expected -- tool set instead of keeping
-a now-false invariant (the pattern milestone 3 itself established over
-milestone 1's `test_server_lists_zero_tools`). See
+scrape adapter's `list_profiles`/`get_profile`; milestone 5 (item 5) adds
+the non-destructive profile write tools `create_profile`/`update_profile`/
+`select_profile`/`export_profile`. Each milestone updates this same
+assertion to the new -- expected -- tool set instead of keeping a now-false
+invariant (the pattern milestone 3 itself established over milestone 1's
+`test_server_lists_zero_tools`). See
 `test_tools_portfolio.py`/`test_tools_exchanges.py`/`test_tools_profiles.py`
 for per-tool behavior and `test_server_tools_integration.py` for an
 end-to-end call through this same `mcp` wiring.
@@ -26,7 +28,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_4_TOOL_NAMES = {
+EXPECTED_MILESTONE_5_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -39,6 +41,10 @@ EXPECTED_MILESTONE_4_TOOL_NAMES = {
     "get_exchange_details",
     "list_profiles",
     "get_profile",
+    "create_profile",
+    "update_profile",
+    "select_profile",
+    "export_profile",
 }
 
 
@@ -55,9 +61,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_4_tools(client: Client):
+async def test_server_lists_the_milestone_5_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_4_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_5_TOOL_NAMES
 
 
 @pytest.mark.anyio

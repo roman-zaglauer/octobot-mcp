@@ -126,6 +126,9 @@ Before returning anything, `_parse_profiles_selector_html` raises
   "Known gap" above for this heuristic's limits.
 """
 
+import base64
+import binascii
+from email.message import Message
 from typing import Any
 
 import httpx2 as httpx
@@ -137,14 +140,55 @@ from octobot_mcp.context import get_client
 from octobot_mcp.errors import (
     OctoBotClientError,
     OctoBotConnectionError,
+    OctoBotMalformedResponseError,
     OctoBotServerError,
     OctoBotTimeoutError,
+    ProfileImportFailedError,
     ProfileNotFoundError,
     ProfileScrapeContractBrokenError,
+    ProfileSelectionFailedError,
+    ProfileUpdateRejectedError,
 )
 from octobot_mcp.tools._shared import with_error_handling
 
 _PROFILES_SELECTOR_PATH = "/profiles_selector"
+
+#: Sent on every milestone-5 write request that can hit OctoBot's global 500
+#: handler (`controllers/errors.py::internal_error`), which only returns a
+#: readable JSON error string when the *request's* Content-Type was exactly
+#: `application/json` -- otherwise it renders a full HTML error page.
+#: Confirmed against source and reproduced live against the OctoBot 2.1.1
+#: test instance: `GET /profiles_management/duplicate?profile_id=<bad-id>`
+#: returns a 21KB HTML page without this header and the one-line JSON string
+#: `"...: 'bad-id' (KeyError)"` with it. Harmless to send on a body-less GET.
+_JSON_ERROR_HINT_HEADERS = {"Content-Type": "application/json"}
+
+_VALID_CREATE_PROFILE_MODES = (
+    "duplicate",
+    "import_file",
+    "import_url",
+    "import_cloud_strategy",
+)
+
+
+def _parse_content_disposition_filename(content_disposition: str) -> str | None:
+    """Extract `filename` from a `Content-Disposition` header value, or `None` if absent.
+
+    RFC 6266/2183: a header parameter is only quoted when its value isn't a
+    bare HTTP token (e.g. it contains a space) -- `attachment;
+    filename="some name.zip"` vs. `attachment; filename=some_name.zip` are
+    both valid and both real (confirmed live: OctoBot's own `flask.send_file`
+    produces the unquoted form for any profile name that happens to already
+    be a single token, e.g. its stock `daily_trading` profile). A regex
+    matching only the quoted form silently mishandles the unquoted one, so
+    this uses the stdlib's own header-parameter parser
+    (`email.message.Message.get_filename`, the same RFC 2183 parameter
+    grammar `Content-Disposition` uses) instead of hand-rolling either
+    form.
+    """
+    message = Message()
+    message["content-disposition"] = content_disposition
+    return message.get_filename()
 
 #: Confirmed source-level mapping (see module docstring): any other/absent
 #: badge text is a legitimate "neither trader enabled" state, not a broken
@@ -331,6 +375,87 @@ async def _fetch_and_parse_profiles(client: httpx.AsyncClient) -> list[dict[str,
     return _parse_profiles_selector_html(html)
 
 
+# --- milestone 5: profile write tools (create/update/select/export) --------
+
+
+async def _request_raw(
+    client: httpx.AsyncClient, method: str, path: str, **kwargs: Any
+) -> httpx.Response:
+    """Perform one request without decoding JSON, classifying only transport failures.
+
+    `octobot_mcp.client.request_json` can't be reused here (same reason as
+    `_fetch_profiles_selector_html`, generalized): depending on the action
+    and outcome, these routes return a bare JSON string, a JSON object, a
+    full HTML page, an HTTP redirect with no useful body, or a binary zip
+    -- never a single uniform shape `request_json` could decode. Only the
+    transport-level failures (timeout, unreachable) are classified here;
+    every call site classifies its own status codes, since e.g. a 302 means
+    something different for `import_file` (a routine outcome) than for
+    `duplicate` (never expected). NFR-4 is still satisfied: no raw httpx2
+    exception ever escapes this function.
+    """
+    try:
+        return await client.request(method, path, **kwargs)
+    except httpx.TimeoutException as exc:
+        raise OctoBotTimeoutError(f"Request to OctoBot timed out: {method} {path}") from exc
+    except httpx.HTTPError as exc:
+        raise OctoBotConnectionError(f"Could not reach OctoBot: {method} {path} ({exc})") from exc
+
+
+def _extract_error_text(response: httpx.Response) -> str:
+    """Best-effort extraction of OctoBot's own error text from a non-2xx response.
+
+    Tries to decode a JSON body first (a bare string, or a dict carrying a
+    `text` key -- both real shapes OctoBot's `profiles_management` actions
+    and its global error handler return, confirmed against source and live).
+    Falls back to the raw response text (e.g. an HTML error page, or
+    werkzeug's own plain-text 4xx bodies) if the body isn't JSON.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text.strip() or f"HTTP {response.status_code} with an empty body"
+    if isinstance(body, dict) and "text" in body:
+        return str(body["text"])
+    return str(body)
+
+
+def _find_new_profile(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+    *,
+    mode: str,
+    detail: str,
+) -> dict[str, Any]:
+    """Identify the one profile that appeared between two `list_profiles` scrapes.
+
+    `duplicate`, `import_file`, and `import_url` (unlike `import_cloud_strategy`)
+    never return the new profile's id in their own OctoBot response -- see
+    `create_profile`'s docstring for the source-verified detail -- so this
+    tool determines it by diffing the existing Tier-B scrape immediately
+    before and after the call, rather than a second/different scrape site.
+    Raises `ProfileImportFailedError` (never guesses) if that diff doesn't
+    find exactly one new profile: zero means the action likely failed
+    silently; more than one means a concurrent profile change on this
+    (possibly shared) OctoBot instance made the diff ambiguous.
+    """
+    before_ids = {profile["profile_id"] for profile in before}
+    new_profiles = [profile for profile in after if profile["profile_id"] not in before_ids]
+    if len(new_profiles) == 1:
+        return new_profiles[0]
+    found_ids = [profile["profile_id"] for profile in new_profiles]
+    raise ProfileImportFailedError(
+        f"create_profile(mode={mode!r}, {detail}): OctoBot's own response for "
+        "this action never includes the new profile's id, so this tool "
+        "identifies it by diffing list_profiles' scrape before/after the "
+        "call. That diff found "
+        f"{'no new profile' if not found_ids else f'{len(found_ids)} new profiles: {found_ids!r}'} "
+        "instead of exactly one -- either the action silently failed, or "
+        "another change to this OctoBot instance's profiles happened "
+        "concurrently and made the diff ambiguous."
+    )
+
+
 @with_error_handling
 async def list_profiles(ctx: Context) -> Any:
     """List every profile OctoBot knows about, including which one is selected.
@@ -381,7 +506,431 @@ async def get_profile(ctx: Context, profile_id: str | None = None) -> Any:
     raise ProfileNotFoundError(f"No profile found with profile_id={profile_id!r}.")
 
 
+def _require(value: Any, field_name: str, mode: str) -> Any:
+    """Validate one `create_profile` mode's required argument was actually given."""
+    if value is None:
+        raise ProfileImportFailedError(
+            f"create_profile(mode={mode!r}) requires {field_name!r}, but it was not provided."
+        )
+    return value
+
+
+async def _create_profile_duplicate(client: httpx.AsyncClient, source_profile_id: str) -> dict[str, Any]:
+    """`duplicate` mode: `GET /profiles_management/duplicate?profile_id=<id>` (spec [V], confirmed).
+
+    OctoBot's success body is the literal JSON string `"Profile created"`
+    (confirmed against source `controllers/configuration.py` and live) --
+    it never includes the new profile's id or name, so `_find_new_profile`
+    resolves it by diffing `list_profiles`' scrape (see that function's
+    docstring). A bad `source_profile_id` raises an uncaught `KeyError`
+    inside OctoBot (confirmed live: `.../duplicate?profile_id=does-not-exist`
+    -> HTTP 500, body `"...: 'does-not-exist' (KeyError)"` with the
+    `Content-Type: application/json` request header this call always sends).
+    """
+    before = await _fetch_and_parse_profiles(client)
+    response = await _request_raw(
+        client,
+        "GET",
+        "/profiles_management/duplicate",
+        params={"profile_id": source_profile_id},
+        headers=_JSON_ERROR_HINT_HEADERS,
+    )
+    if response.status_code >= 400:
+        raise ProfileImportFailedError(
+            f"OctoBot failed to duplicate profile_id={source_profile_id!r}: "
+            f"{_extract_error_text(response)}"
+        )
+    after = await _fetch_and_parse_profiles(client)
+    new_profile = _find_new_profile(
+        before, after, mode="duplicate", detail=f"source_profile_id={source_profile_id!r}"
+    )
+    return {
+        "profile_id": new_profile["profile_id"],
+        "name": new_profile["name"],
+        "message": "Profile created",
+    }
+
+
+async def _create_profile_import_file(
+    client: httpx.AsyncClient, file_base64: str, filename: str
+) -> dict[str, Any]:
+    """`import_file` mode: `POST /profiles_management/import` (multipart `file`, spec [V]).
+
+    **Spec correction (verified against source `controllers/configuration.py`,
+    action `"import"`)**: this route ALWAYS responds with an HTTP redirect
+    (302 to `/profile`, confirmed live) regardless of success or failure --
+    it never returns JSON at all, unlike `"download"` below. Any outcome
+    (including a failed import: the controller catches the failure
+    internally and only flashes a warning into the redirect's session
+    cookie, which this tool does not attempt to decode -- an
+    itsdangerous-signed but unencrypted implementation detail, too fragile
+    to build on) is therefore invisible at the HTTP level. This tool
+    determines the outcome the same way as `duplicate`: diffing
+    `list_profiles`' scrape before/after the call (see `_find_new_profile`).
+    """
+    try:
+        file_bytes = base64.b64decode(file_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ProfileImportFailedError(
+            f"create_profile(mode='import_file'): file_base64 is not valid base64 ({exc})."
+        ) from exc
+
+    before = await _fetch_and_parse_profiles(client)
+    response = await _request_raw(
+        client,
+        "POST",
+        "/profiles_management/import",
+        files={"file": (filename, file_bytes)},
+    )
+    if response.status_code >= 400:
+        raise ProfileImportFailedError(
+            f"OctoBot failed to import profile file {filename!r}: {_extract_error_text(response)}"
+        )
+    after = await _fetch_and_parse_profiles(client)
+    new_profile = _find_new_profile(before, after, mode="import_file", detail=f"filename={filename!r}")
+    return {
+        "profile_id": new_profile["profile_id"],
+        "name": new_profile["name"],
+        "message": "Profile created",
+    }
+
+
+async def _create_profile_import_url(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
+    """`import_url` mode: `POST /profiles_management/download` with form field `inputProfileLink` (spec [V]).
+
+    **Spec correction -- a genuine OctoBot bug, not a misunderstanding of
+    the spec (verified against source AND reproduced live against the
+    OctoBot 2.1.1 test instance)**: `controllers/configuration.py`'s
+    `"download"` action unconditionally evaluates
+    `flask.request.json.get('strategy_id')` before ever checking whether a
+    form-encoded `inputProfileLink` was supplied. Flask/Werkzeug raises
+    `UnsupportedMediaType` (415) the instant `.json` is accessed on a
+    request whose Content-Type isn't `application/json` -- and OctoBot's
+    own template (`components/config/profiles.html`'s
+    `.profile-download-form`, confirmed by reading it) submits this action
+    as a plain `method="POST"` HTML form with no `enctype` override, i.e.
+    `application/x-www-form-urlencoded`, the same shape this tool sends.
+    Reproduced live: `curl -d "inputProfileLink=..."` AND
+    `curl -F "inputProfileLink=..."` (urlencoded and multipart) both return
+    an identical HTTP 415 with body "Did not attempt to load JSON data
+    because the request Content-Type was not 'application/json'." There is
+    no standard request shape that is simultaneously valid
+    `application/x-www-form-urlencoded`/`multipart/form-data` (required for
+    `.form.get('inputProfileLink')` to see the URL at all) AND
+    `application/json` (required for the unconditional `.json.get(...)`
+    call three lines later not to raise) -- so, as literally coded, this
+    OctoBot route is presently unreachable via `import_url` by ANY HTTP
+    client, including OctoBot's own browser UI. This tool still sends the
+    spec-correct/OctoBot-UI-matching request rather than a nonstandard
+    workaround, so `import_url` will fail with a `ProfileImportFailedError`
+    wrapping that 415 message until OctoBot fixes this upstream.
+    """
+    before = await _fetch_and_parse_profiles(client)
+    response = await _request_raw(
+        client,
+        "POST",
+        "/profiles_management/download",
+        data={"inputProfileLink": url},
+    )
+    if response.status_code >= 400:
+        raise ProfileImportFailedError(
+            f"OctoBot failed to import profile from url={url!r}: {_extract_error_text(response)}"
+        )
+    after = await _fetch_and_parse_profiles(client)
+    new_profile = _find_new_profile(before, after, mode="import_url", detail=f"url={url!r}")
+    return {
+        "profile_id": new_profile["profile_id"],
+        "name": new_profile["name"],
+        "message": "Profile created",
+    }
+
+
+async def _create_profile_import_cloud_strategy(
+    client: httpx.AsyncClient, strategy_id: str, name: str, description: str
+) -> dict[str, Any]:
+    """`import_cloud_strategy` mode: `POST /profiles_management/download` with a JSON body (spec [V]).
+
+    Unlike the other 3 modes, OctoBot's own success response DOES include
+    the new profile's id (`{"text": <message>, "profile_id": <id>}`,
+    confirmed against source and live with a deliberately-invalid
+    `strategy_id`, which instead returns HTTP 400 with `profile_id: ""` and
+    a real error message: `"Error when importing profile: '<strategy_id>'"`)
+    -- no scrape-diffing needed for this mode.
+    """
+    response = await _request_raw(
+        client,
+        "POST",
+        "/profiles_management/download",
+        json={"strategy_id": strategy_id, "name": name, "description": description},
+    )
+    if response.status_code >= 400:
+        raise ProfileImportFailedError(
+            f"OctoBot failed to import cloud strategy strategy_id={strategy_id!r}: "
+            f"{_extract_error_text(response)}"
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise OctoBotMalformedResponseError(
+            "OctoBot returned a 2xx response with a non-JSON body for "
+            "POST /profiles_management/download (import_cloud_strategy)."
+        ) from exc
+    profile_id = body.get("profile_id") if isinstance(body, dict) else None
+    if not profile_id:
+        raise ProfileImportFailedError(
+            "OctoBot reported success importing cloud strategy "
+            f"strategy_id={strategy_id!r} but returned no profile_id: {body!r}."
+        )
+    return {
+        "profile_id": profile_id,
+        "name": name,
+        "message": body.get("text", "Profile created") if isinstance(body, dict) else "Profile created",
+    }
+
+
+@with_error_handling
+async def create_profile(
+    ctx: Context,
+    mode: str,
+    source_profile_id: str | None = None,
+    file_base64: str | None = None,
+    filename: str | None = None,
+    url: str | None = None,
+    strategy_id: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+) -> Any:
+    """Create a new profile, one of 4 ways, discriminated by `mode`.
+
+    Not confirm-gated (ADR-0003): creates new state, never destroys
+    anything or touches credentials/live trading. Every mode's exact
+    request shape was verified against OctoBot source
+    (`controllers/configuration.py`'s `profiles_management` route) and,
+    where practical, against the live test instance -- see each
+    `_create_profile_*` helper's docstring for the per-mode detail and the
+    two spec corrections found along the way (`import_file` never returns
+    JSON; `import_url` is presently broken upstream). Only the arguments
+    relevant to the chosen `mode` need to be supplied; the rest are
+    ignored:
+
+    - `mode="duplicate"`: requires `source_profile_id`.
+    - `mode="import_file"`: requires `file_base64` (the file's raw bytes,
+      base64-encoded) and `filename`.
+    - `mode="import_url"`: requires `url`.
+    - `mode="import_cloud_strategy"`: requires `strategy_id` and `name`;
+      `description` is optional (defaults to `""`).
+
+    Output: `{"profile_id": str, "name": str, "message": str}`.
+
+    Raises `ProfileImportFailedError` for any failure in any mode
+    (including a missing required argument for the chosen `mode`, or an
+    unrecognized `mode`) -- OctoBot's own error text is included where one
+    exists.
+    """
+    client = get_client(ctx)
+    if mode == "duplicate":
+        return await _create_profile_duplicate(
+            client, _require(source_profile_id, "source_profile_id", mode)
+        )
+    if mode == "import_file":
+        return await _create_profile_import_file(
+            client,
+            _require(file_base64, "file_base64", mode),
+            _require(filename, "filename", mode),
+        )
+    if mode == "import_url":
+        return await _create_profile_import_url(client, _require(url, "url", mode))
+    if mode == "import_cloud_strategy":
+        return await _create_profile_import_cloud_strategy(
+            client,
+            _require(strategy_id, "strategy_id", mode),
+            _require(name, "name", mode),
+            description or "",
+        )
+    raise ProfileImportFailedError(
+        f"create_profile: unknown mode {mode!r}; expected one of {_VALID_CREATE_PROFILE_MODES!r}."
+    )
+
+
+@with_error_handling
+async def update_profile(ctx: Context, profile_id: str, patch: dict[str, Any]) -> Any:
+    """Update an existing profile's metadata (never the active/selected profile's name).
+
+    Maps to `POST /profiles_management/update` with JSON body
+    `{"id": profile_id, **patch}` (confirmed against source
+    `models/profiles.py::update_profile()`, which reads exactly this shape).
+
+    **Spec corrections, both verified against source and reproduced live**:
+    - `patch["risk"]`/`patch["complexity"]` must be an int (or int-parseable
+      string) matching OctoBot's enum ordinals -- **not** the display
+      strings `list_profiles` returns (`"Low"`, `"Difficult"`, ...). Source
+      (`octobot_commons.enums`): `ProfileRisk` is `LOW=1, MODERATE=2, HIGH=3`;
+      `ProfileComplexity` is `EASY=1, MEDIUM=2, DIFFICULT=3`. Sending a
+      display string (confirmed live) raises an uncaught `ValueError`
+      inside OctoBot, surfaced by this tool as a `ProfileUpdateRejectedError`
+      wrapping `"invalid literal for int() with base 10: 'Moderate'"`,
+      HTTP 500 -- not the clean `UPDATE_REJECTED` 400 path.
+    - `patch["config"]` is accepted by this tool's input schema for
+      forward-compatibility with the documented spec shape, but is
+      currently silently ignored by OctoBot's deployed route: the
+      controller only ever calls `models.update_profile(id, data)` --
+      never passing the third `json_profile_content` parameter that is the
+      only thing `update_profile()` actually assigns to `profile.config`.
+      There is no way for this tool to make `config` take effect against
+      the current OctoBot version.
+    - Renaming the currently-selected profile is rejected by OctoBot itself
+      (`"Can't rename the active profile"`, confirmed live), surfaced here
+      as `ProfileUpdateRejectedError` with that exact message.
+
+    Output: `{"profile_id": str, "updated_fields": object}` (`updated_fields`
+    echoes the `patch` this tool sent -- OctoBot's own success response is
+    the same data echoed back, so there is nothing more to report).
+
+    Not confirm-gated (ADR-0003): does not destroy anything or touch
+    credentials/live trading.
+    """
+    client = get_client(ctx)
+    response = await _request_raw(
+        client,
+        "POST",
+        "/profiles_management/update",
+        json={"id": profile_id, **patch},
+    )
+    if response.status_code >= 400:
+        raise ProfileUpdateRejectedError(
+            f"OctoBot rejected updating profile_id={profile_id!r}: {_extract_error_text(response)}"
+        )
+    return {"profile_id": profile_id, "updated_fields": patch}
+
+
+@with_error_handling
+async def select_profile(ctx: Context, profile_id: str) -> Any:
+    """Select a profile as OctoBot's current/active profile.
+
+    Maps to `GET /profile?select=<profile_id>` (spec [V]).
+
+    **Spec correction, verified against source
+    (`controllers/configuration.py::profile()`) and reproduced live**: this
+    route always responds HTTP 200 with a full HTML page, whether or not
+    the selection actually happened -- an unknown `profile_id` makes
+    `models.select_profile()` raise `NoProfileError`, which the route
+    catches internally, flashes a warning ("The requested profile no
+    longer exists.") into an HTML-only, session-cookie-based flash message,
+    and re-renders the PREVIOUSLY-selected profile's page, still with a 200
+    status. There is no way to distinguish success from this silent-failure
+    case from the HTTP response alone. This tool therefore always
+    re-fetches the currently-selected profile afterward (the same scrape
+    `list_profiles`/`get_profile` use) and raises
+    `ProfileSelectionFailedError` if it doesn't match `profile_id`, rather
+    than trusting the 200 status.
+
+    Output: `{"profile_id": str, "selected": true}`. Idempotent (selecting
+    the already-selected profile is a verified no-op on OctoBot's side) and
+    not confirm-gated (ADR-0003).
+    """
+    client = get_client(ctx)
+    response = await _request_raw(
+        client,
+        "GET",
+        "/profile",
+        params={"select": profile_id},
+        headers=_JSON_ERROR_HINT_HEADERS,
+    )
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} selecting "
+            f"profile_id={profile_id!r}: {_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot returned client error {response.status_code} selecting "
+            f"profile_id={profile_id!r}: {_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+
+    profiles = await _fetch_and_parse_profiles(client)
+    current = next((profile for profile in profiles if profile["is_selected"]), None)
+    still_selected_id = current["profile_id"] if current is not None else None
+    if still_selected_id != profile_id:
+        raise ProfileSelectionFailedError(
+            f"OctoBot did not select profile_id={profile_id!r} -- after the "
+            f"request, the selected profile is still {still_selected_id!r}. "
+            "This most likely means profile_id doesn't exist: verified "
+            "against source, GET /profile?select=<id> silently keeps the "
+            "previous profile selected on an unknown id rather than "
+            "returning any failing HTTP status (see this tool's docstring)."
+        )
+    return {"profile_id": profile_id, "selected": True}
+
+
+@with_error_handling
+async def export_profile(ctx: Context, profile_id: str) -> Any:
+    """Export a profile as a zip archive, base64-encoded.
+
+    Maps to `GET /profiles_management/export?profile_id=<profile_id>`
+    (spec [V]; `profile_id` confirmed as the exact query-param name against
+    source `controllers/configuration.py`, action `"export"` -- not `id`).
+    This route returns the zip's raw bytes directly (`flask.send_file`),
+    not JSON, so this tool bypasses `octobot_mcp.client.request_json`
+    (same reason as `_fetch_profiles_selector_html`) and base64-encodes the
+    raw response body instead.
+
+    `filename` is read from the response's `Content-Disposition` header
+    (confirmed live: `attachment; filename=<profile name>_<YYYYMMDD-HHMMSS>.zip`,
+    quoted only when the profile name isn't already a single HTTP token --
+    e.g. it contains a space -- per RFC 6266/2183; both forms confirmed
+    live, see `_parse_content_disposition_filename`) rather than
+    reconstructed locally, so it always matches exactly what OctoBot named
+    the file. Raises `OctoBotMalformedResponseError` if that header is
+    missing or unparseable -- never returns a fabricated filename.
+
+    Output: `{"profile_id": str, "filename": str, "content_base64": str}`.
+    Read-only, not confirm-gated (ADR-0003). An unknown `profile_id` raises
+    an uncaught `NoProfileError` inside OctoBot (HTTP 500, confirmed live
+    with the `Content-Type: application/json` request header this call
+    always sends for a readable error message).
+    """
+    client = get_client(ctx)
+    response = await _request_raw(
+        client,
+        "GET",
+        "/profiles_management/export",
+        params={"profile_id": profile_id},
+        headers=_JSON_ERROR_HINT_HEADERS,
+    )
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} exporting "
+            f"profile_id={profile_id!r}: {_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot returned client error {response.status_code} exporting "
+            f"profile_id={profile_id!r}: {_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+
+    content_disposition = response.headers.get("content-disposition", "")
+    filename = _parse_content_disposition_filename(content_disposition)
+    if not filename:
+        raise OctoBotMalformedResponseError(
+            f"OctoBot's export response for profile_id={profile_id!r} had no "
+            f"parsable filename in its Content-Disposition header ({content_disposition!r})."
+        )
+    return {
+        "profile_id": profile_id,
+        "filename": filename,
+        "content_base64": base64.b64encode(response.content).decode("ascii"),
+    }
+
+
 def register(mcp: MCPServer) -> None:
     """Register this module's tools onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
     mcp.tool()(list_profiles)
     mcp.tool()(get_profile)
+    mcp.tool()(create_profile)
+    mcp.tool()(update_profile)
+    mcp.tool()(select_profile)
+    mcp.tool()(export_profile)

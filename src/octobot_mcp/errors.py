@@ -28,6 +28,27 @@ catches:
 - `ProfileNotFoundError` -- the scrape succeeded but no profile matched the
   requested `profile_id` (a normal "not found," distinct from a broken
   scrape).
+
+Milestone 5 (docs/tasklist.md item 5, profile write tools) adds three more,
+for the same reason: none are raw connectivity failures, but each wraps a
+domain-specific failure mode of one write tool in `octobot_mcp.tools.profiles`
+that this project's verification against OctoBot source (see that module's
+docstrings) found is NOT reliably signalled by HTTP status alone:
+- `ProfileImportFailedError` -- `create_profile` (any of its 4 modes)
+  failed. Wraps OctoBot's own error text where available (`duplicate`,
+  `import_file`, `import_url`, `import_cloud_strategy` all classified into
+  this one error per the spec's `IMPORT_FAILED` code), including the case
+  where OctoBot reported success but this tool could not reliably identify
+  which profile it created.
+- `ProfileUpdateRejectedError` -- `update_profile` failed; wraps OctoBot's
+  own `(success, err)` failure string (spec's `UPDATE_REJECTED` code).
+- `ProfileSelectionFailedError` -- `select_profile` did not actually select
+  the requested profile. Not in the original spec's error-code table:
+  added because `GET /profile?select=<id>` (verified against source) always
+  returns HTTP 200 and silently keeps the previous profile selected on an
+  unknown id, so this tool must positively re-check the selection
+  afterward rather than trust the response status -- see
+  `octobot_mcp.tools.profiles.select_profile`'s docstring.
 """
 
 from __future__ import annotations
@@ -95,4 +116,42 @@ class ProfileNotFoundError(OctoBotAPIError):
     itself succeeded and returned a well-formed profile list, but the
     requested id simply isn't among the profiles that currently exist on
     the OctoBot instance. Raised by `octobot_mcp.tools.profiles.get_profile`.
+    """
+
+
+class ProfileImportFailedError(OctoBotAPIError):
+    """`create_profile` failed, in any of its 4 modes (milestone 5).
+
+    Wraps OctoBot's own error text where the underlying
+    `/profiles_management/duplicate`/`import`/`download` action provided
+    one, or explains why this tool couldn't determine the outcome (e.g. a
+    diff-based new-profile lookup found zero or more than one candidate)
+    when it didn't. See `octobot_mcp.tools.profiles.create_profile`'s
+    docstring for the per-mode verified request/response shapes and the
+    corrections made to this tool's spec entry.
+    """
+
+
+class ProfileUpdateRejectedError(OctoBotAPIError):
+    """`update_profile` failed (spec's `UPDATE_REJECTED` code).
+
+    Wraps the `err` string from OctoBot's `update_profile()` model
+    function's `(success, err)` return value, or another failure OctoBot's
+    global error handler surfaced as JSON text. See
+    `octobot_mcp.tools.profiles.update_profile`'s docstring for the
+    verified request body shape (including the spec correction for
+    `risk`/`complexity`'s actual expected type).
+    """
+
+
+class ProfileSelectionFailedError(OctoBotAPIError):
+    """`select_profile` did not actually select the requested profile.
+
+    Not a status-code failure: `GET /profile?select=<id>` (verified against
+    OctoBot source) always responds HTTP 200 and silently keeps whatever
+    profile was already selected if `profile_id` doesn't exist, so this
+    tool re-checks the selection afterward via the same scrape
+    `list_profiles`/`get_profile` use and raises this instead of trusting
+    the response status. See
+    `octobot_mcp.tools.profiles.select_profile`'s docstring.
     """
