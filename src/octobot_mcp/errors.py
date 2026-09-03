@@ -80,6 +80,15 @@ an error (see `octobot_mcp.tools._shared.require_confirmation`):
   scrape at all) -- see
   `octobot_mcp.tools.profiles.convert_profile_to_live`'s docstring for the
   full, source-verified explanation of this terminology collision.
+
+Milestone 7 (docs/tasklist.md item 7, job store scaffolding) adds one more,
+for the same "never a raw stack trace reaches the MCP client" reason, even
+though it wraps a purely in-memory lookup miss rather than any OctoBot
+connectivity failure:
+- `JobNotFoundError` -- `get_job_status`/`cancel_job` were given a `job_id`
+  the in-memory job store has no record of. Per ADR-0002's risk table, this
+  is an *expected* outcome after a server restart (the job store is
+  process-lifetime only, never persisted), not a bug -- the message says so.
 """
 
 from __future__ import annotations
@@ -218,4 +227,17 @@ class ProfileConversionFailedError(OctoBotAPIError):
     concepts that merely share a name; see
     `octobot_mcp.tools.profiles.convert_profile_to_live`'s docstring for the
     full source-verified explanation.
+    """
+
+
+class JobNotFoundError(OctoBotAPIError):
+    """No job matching the requested `job_id` was found in the in-memory job store.
+
+    Distinct from every other error in this module: it never involves an
+    OctoBot HTTP call at all -- `octobot_mcp.jobs.JobStore` is a purely
+    in-memory, process-lifetime structure. Per ADR-0002's risk table, an
+    unknown `job_id` is *expected* after a server restart (the store holds
+    nothing across restarts), not a bug; the message raised alongside this
+    exception says so explicitly. Raised by
+    `octobot_mcp.tools.jobs.get_job_status`/`cancel_job`.
     """

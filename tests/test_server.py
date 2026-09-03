@@ -9,12 +9,15 @@ registered the first 10; milestone 4 (item 4) adds the Tier-B profile
 scrape adapter's `list_profiles`/`get_profile`; milestone 5 (item 5) adds
 the non-destructive profile write tools `create_profile`/`update_profile`/
 `select_profile`/`export_profile`; milestone 6 (item 6) adds the first two
-confirm-gated tools (ADR-0003), `delete_profile`/`convert_profile_to_live`.
+confirm-gated tools (ADR-0003), `delete_profile`/`convert_profile_to_live`;
+milestone 7 (item 7) adds the job store scaffolding's 3 tools,
+`get_job_status`/`list_jobs`/`cancel_job` (none confirm-gated, none making
+any HTTP/Socket.IO call -- they operate purely on the in-memory job store).
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
 `test_tools_portfolio.py`/`test_tools_exchanges.py`/`test_tools_profiles.py`/
-`test_tools_profiles_gated.py` for per-tool behavior and
+`test_tools_profiles_gated.py`/`test_tools_jobs.py` for per-tool behavior and
 `test_server_tools_integration.py` for an end-to-end call through this same
 `mcp` wiring.
 
@@ -30,7 +33,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_6_TOOL_NAMES = {
+EXPECTED_MILESTONE_7_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -49,6 +52,9 @@ EXPECTED_MILESTONE_6_TOOL_NAMES = {
     "export_profile",
     "delete_profile",
     "convert_profile_to_live",
+    "get_job_status",
+    "list_jobs",
+    "cancel_job",
 }
 
 
@@ -65,9 +71,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_6_tools(client: Client):
+async def test_server_lists_the_milestone_7_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_6_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_7_TOOL_NAMES
 
 
 @pytest.mark.anyio
