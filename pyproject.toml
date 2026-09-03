@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "octobot-mcp"
+version = "0.1.0"
+description = "MCP server wrapping an OctoBot instance's web API for AI-agent-driven trading profile and backtest management"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.1.1,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "mcp[cli]>=2.1.1,<3",
+]
+
+[project.scripts]
+octobot-mcp = "octobot_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
