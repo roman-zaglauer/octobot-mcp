@@ -19,6 +19,7 @@ registration `server.py` itself calls.
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx2 as httpx
 import pytest
@@ -27,6 +28,10 @@ from mcp.server import MCPServer
 
 from octobot_mcp.context import AppContext
 from octobot_mcp.tools import register_all
+
+_PROFILES_SELECTOR_HTML = (
+    Path(__file__).parent / "fixtures" / "profiles_selector_valid.html"
+).read_text()
 
 
 def _build_test_server(handler) -> MCPServer:
@@ -88,3 +93,23 @@ async def test_get_positions_failure_surfaces_as_structured_mcp_error_not_a_cras
         )
         assert "OctoBotServerError" in text
         assert "Traceback" not in text
+
+
+@pytest.mark.anyio
+async def test_list_profiles_succeeds_through_the_full_protocol_stack():
+    # Tier-B scrape adapter (milestone 4, ADR-0006): same real HTML fixture
+    # test_tools_profiles.py's unit tests use, driven through the actual
+    # tools/call request path this time.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/profiles_selector"
+        return httpx.Response(200, text=_PROFILES_SELECTOR_HTML)
+
+    server = _build_test_server(handler)
+    async with Client(server, raise_exceptions=True) as client:
+        result = await client.call_tool("list_profiles", {})
+        assert result.is_error is not True
+        (text_block,) = result.content
+        payload = json.loads(text_block.text)
+        assert payload["warning"] is None
+        selected = [p for p in payload["profiles"] if p["is_selected"]]
+        assert len(selected) == 1

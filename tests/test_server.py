@@ -5,12 +5,14 @@ SDK's own docs) so the handshake (initialize + tools/list) is exercised
 without spawning a subprocess.
 
 Milestone 1 registered zero tools; milestone 3 (docs/tasklist.md item 3)
-registers the first 10, so `test_server_lists_zero_tools` from that
-milestone is updated here to assert the new -- expected -- tool set
-instead, rather than kept as a now-false invariant. See
-`test_tools_portfolio.py`/`test_tools_exchanges.py` for per-tool behavior
-and `test_server_tools_integration.py` for an end-to-end call through
-this same `mcp` wiring.
+registered the first 10; milestone 4 (item 4) adds the Tier-B profile
+scrape adapter's `list_profiles`/`get_profile`. Each milestone updates
+this same assertion to the new -- expected -- tool set instead of keeping
+a now-false invariant (the pattern milestone 3 itself established over
+milestone 1's `test_server_lists_zero_tools`). See
+`test_tools_portfolio.py`/`test_tools_exchanges.py`/`test_tools_profiles.py`
+for per-tool behavior and `test_server_tools_integration.py` for an
+end-to-end call through this same `mcp` wiring.
 
 Since milestone 3 also wires `mcp`'s real `app_lifespan` (NFR-11) into
 this module-level `mcp` instance, connecting a `Client` to it now runs
@@ -24,7 +26,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_3_TOOL_NAMES = {
+EXPECTED_MILESTONE_4_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -35,6 +37,8 @@ EXPECTED_MILESTONE_3_TOOL_NAMES = {
     "get_all_symbols",
     "check_accounts_compatible",
     "get_exchange_details",
+    "list_profiles",
+    "get_profile",
 }
 
 
@@ -51,9 +55,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_3_read_only_tools(client: Client):
+async def test_server_lists_the_milestone_4_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_3_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_4_TOOL_NAMES
 
 
 @pytest.mark.anyio
