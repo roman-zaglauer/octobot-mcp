@@ -141,9 +141,10 @@ injection.
 
 import asyncio
 import contextlib
+import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -154,7 +155,7 @@ from mcp.server.mcpserver.context import Context
 
 from octobot_mcp.client import request_json
 from octobot_mcp.context import get_client, get_job_store
-from octobot_mcp.eta import WATCHER_INTERVAL_SECONDS
+from octobot_mcp.eta import WATCHER_INTERVAL_SECONDS, estimate_combined_progress
 from octobot_mcp.errors import (
     BacktestStartFailedError,
     CompareStrategiesStartFailedError,
@@ -167,8 +168,24 @@ from octobot_mcp.errors import (
     OctoBotServerError,
     OctoBotTimeoutError,
 )
-from octobot_mcp.jobs import TERMINAL_STATES, JobStore
+from octobot_mcp.jobs import TERMINAL_STATES, JobRecord, JobStore
 from octobot_mcp.tools._shared import with_error_handling
+
+_logger = logging.getLogger(__name__)
+
+#: Milestone 11 (docs/tasklist.md item 11): one job's `progress_notifier`
+#: (`octobot_mcp.jobs.JobRecord.progress_notifier`) sends a notification
+#: carrying `(progress, total, message)`. This module reports progress on
+#: the same 0-100 scale `progress_percent` already uses, with `total`
+#: pinned to 100 -- MCP's own progress notification spec treats
+#: `progress`/`total` as arbitrary-scale numbers (e.g. bytes transferred /
+#: total bytes), not necessarily a percentage, but "percent out of 100" is
+#: itself a perfectly valid instance of that same `progress`/`total` shape,
+#: and it is what every other output this project already produces
+#: (`get_job_status`'s own `progress_percent`) uses -- so a client rendering
+#: this job's notifications sees the exact same number range polling would
+#: have shown it.
+_PROGRESS_NOTIFICATION_TOTAL = 100.0
 
 #: How often `_propagate_parent_cancel_to_child` polls the PARENT
 #: `compare_strategies` job's own `cancel_requested` flag while one of its
@@ -223,6 +240,267 @@ _MISSING_EXCHANGE_ID_EXPLANATION = (
 #: `_request_raw`/`_extract_error_text`, which milestone 3-6 already
 #: duplicated locally rather than factoring out).
 _JSON_ERROR_HINT_HEADERS = {"Content-Type": "application/json"}
+
+
+# --- Milestone 11: opportunistic MCP progress notifications (docs/tasklist.md item 11) ---
+#
+# ADR-0002 decision point 3: "if the caller supplies a `progressToken`, the
+# server also emits an MCP progress notification each time the watcher
+# observes a changed value. If no token is supplied ... polling still works
+# because the job record is authoritative regardless of notification
+# delivery." Everything below is purely additive on top of the watcher loop
+# that already existed (milestone 8/10) -- none of it is required for, or
+# changes the behavior of, `get_job_status`/`list_jobs` polling.
+#
+# ## Step 0 research findings (this milestone's own explicit first task)
+#
+# Investigated directly against the installed `mcp` 2.1.1 package (grepping
+# `site-packages/mcp` for `progress`/`progressToken`/`report_progress`/
+# `send_progress_notification`, then confirming behavior live against the
+# SDK's own `Client`/`MCPServer`, the same technique this project has used
+# throughout -- not assumed from training data, per this milestone's own
+# explicit instruction):
+#
+# 1. **How a caller's `progressToken` becomes visible inside a tool
+#    function.** The SDK lifts `_meta.progressToken` off the wire into
+#    `ctx.request_context.meta` (a plain `dict`, e.g. `{"progress_token":
+#    "tok-123", ...other reserved _meta keys...}` -- confirmed live: the
+#    wire's camelCase `progressToken` is already normalized to the
+#    snake_case `"progress_token"` dict key by the time it reaches a tool,
+#    via `mcp_types`'s own `Field(alias="progressToken")` on its internal
+#    `Meta` model). `ctx.request_context.meta` is `None` when the caller
+#    supplied no `_meta` at all (confirmed: a plain `call_tool(name, {})`
+#    with no `meta=` kwarg leaves it `None`, no error, no requirement to
+#    supply one -- this satisfies this milestone's research item #3, "fully
+#    opt-in"). `_extract_progress_token` below is the one place this project
+#    reads it.
+#
+# 2. **How to actually SEND one, and the real "background task outlives the
+#    request" constraint.** `ctx.report_progress(...)`
+#    (`Context.report_progress` -> `ServerSession.report_progress` ->
+#    `DispatchContext.progress`) is scoped to the ONE inbound request `ctx`
+#    was built for -- its own docstring says so verbatim ("Report progress
+#    for the inbound request this session is scoped to") -- and is
+#    unusable once that request has already returned a result, which
+#    `start_backtest`/`compare_strategies` always have by the time the
+#    watcher's first real tick happens (the whole point of the async job
+#    pattern, ADR-0002). So this project needed the OTHER SDK mechanism:
+#    `ServerSession.send_progress_notification(progress_token, progress,
+#    total, message, related_request_id=None)`. Confirmed by reading
+#    `ServerSession._notify`: passing no `related_request_id` (this
+#    project's own case -- the watcher has no "current request" at all)
+#    routes through `self._connection.outbound`, the CONNECTION-scoped
+#    channel (`mcp.server.connection.Connection`, "persists across requests
+#    on this connection" per its own docstring) -- NOT the per-request one
+#    `report_progress` uses. This means: **capturing `ctx.session` (the
+#    `ServerSession` object itself) at `start_backtest`/`compare_strategies`
+#    call time, and calling `send_progress_notification` on that SAME
+#    object later from the background watcher task, works** -- confirmed
+#    live end-to-end (a tool call that returns immediately, then a
+#    `asyncio.create_task`'d background coroutine that calls
+#    `session.send_progress_notification(...)` ~50ms/~100ms later, was
+#    observed arriving at a real SDK `Client`'s `message_handler` after the
+#    original `call_tool()` had already returned). `ctx.session` (not
+#    `ctx.request_context.lifespan_context`, and not `ctx` itself, which
+#    goes out of scope with the request) is therefore exactly the "session/
+#    context reference" this milestone's own instructions anticipated
+#    needing to capture and store for later -- `_build_progress_notifier`
+#    below is where that capture happens, and `JobRecord.progress_notifier`
+#    (see `octobot_mcp.jobs`) is where it is kept alive for the job's
+#    lifetime, the same role `JobStore.track_watcher_task` already plays for
+#    the watcher `asyncio.Task` itself (milestone 8).
+#
+#    **A real SDK-testing-harness gotcha worth documenting alongside this**
+#    (found while building this milestone's own tests, not a production
+#    concern): the SDK's fast in-process `mcp.Client(server, ...)` test
+#    helper (used everywhere else in this project, e.g.
+#    `test_server_tools_integration.py`) wires the client and server
+#    together via a `DirectDispatcher` pair with NO real connection object
+#    at all -- confirmed against `mcp.server.runner.modern_on_request`,
+#    which builds a brand-new `Connection.from_envelope(...)` with NO
+#    `outbound=` override (defaulting to the `_NoChannelOutbound` sentinel)
+#    for literally every single request. A late `send_progress_notification`
+#    call against a session captured from that harness is silently dropped
+#    (`Connection`'s own `notify` is documented as best-effort: "If there's
+#    no standalone channel ... the notification is ... silently discarded").
+#    This is NOT a limitation of production usage: this project's real
+#    server (`octobot_mcp.server`, ADR-0001) always speaks real stdio, a
+#    genuine persistent duplex connection, which `serve_dual_era_loop`
+#    always gives a real forwarding `outbound` regardless of which protocol
+#    era the client opens with. It IS, however, a real constraint on how
+#    THIS milestone's own tests must be written: exercising real, delivered,
+#    post-return notifications through `mcp.Client` requires
+#    `mode="legacy"` (confirmed live: this is the one `Client` mode that
+#    routes through `mcp.client._memory.InMemoryTransport` -- a genuine
+#    duplex in-memory stream pair driving the SDK's real
+#    `_serve_legacy_stream`/`Connection.for_loop` -- instead of the fast
+#    connectionless `DirectDispatcher` shortcut every other test in this
+#    project uses) -- see `tests/test_tools_backtesting.py`'s own milestone
+#    11 tests for where this matters.
+#
+# 3. **`progressToken` is fully opt-in**, confirmed above (research item
+#    #3): omitted by essentially every caller in practice, never required,
+#    never an error to omit.
+
+
+def _extract_progress_token(ctx: Context) -> str | int | None:
+    """Read the caller-supplied `progressToken` off `ctx`, or `None` if absent.
+
+    See this module's "Milestone 11" comment block above for exactly how
+    this value reaches `ctx.request_context.meta` and why it is read here
+    rather than via `ctx.report_progress` (which cannot be used later, from
+    the background watcher task, at all). A malformed `bool` value can never
+    reach here in practice (the SDK's own wire-level parsing already
+    excludes it -- `bool` is deliberately not a valid progress token in the
+    protocol, `progressToken: str | int`), but the `isinstance(..., bool)`
+    guard costs nothing and matches the same defensiveness the SDK's own
+    internals apply at the same check.
+    """
+    meta = ctx.request_context.meta
+    if not meta:
+        return None
+    token = meta.get("progress_token")
+    if isinstance(token, bool) or not isinstance(token, (str, int)):
+        return None
+    return token
+
+
+def _build_progress_notifier(
+    ctx: Context, progress_token: str | int
+) -> Callable[[float, float | None, str | None], Awaitable[None]]:
+    """Capture `ctx.session` + `progress_token` into a `(progress, total,
+    message) -> None` async callable a background watcher task can call
+    later, long after `ctx` itself (and the tool call it belongs to) has
+    gone out of scope.
+
+    See this module's "Milestone 11" comment block above for why `ctx.
+    session` specifically (not `ctx` itself) is what must be captured, and
+    why this can only use `send_progress_notification` (never `ctx.
+    report_progress`). Sending is best-effort (this function's own
+    docstring's requirement, and this milestone's own explicit instruction):
+    any exception -- a disconnected client, a closed connection, anything
+    else -- is caught and logged at DEBUG, never propagated, so a
+    notification-delivery failure can NEVER fail the job or the watcher loop
+    that called this.
+    """
+    session = ctx.session
+
+    async def _notify(progress: float, total: float | None, message: str | None) -> None:
+        try:
+            await session.send_progress_notification(progress_token, progress, total, message)
+        except Exception as exc:  # noqa: BLE001 -- best-effort: never fail the watcher over this.
+            _logger.debug(
+                "Failed to send MCP progress notification for token %r (best-effort, ignored): %r",
+                progress_token,
+                exc,
+            )
+
+    return _notify
+
+
+def _attach_progress_notifier(store: JobStore, ctx: Context, job_id: str) -> None:
+    """Extract `ctx`'s `progressToken` (if any) and attach a notifier for `job_id`.
+
+    A no-op (never calls `JobStore.set_progress_notifier` at all) when the
+    caller supplied no token -- `JobRecord.progress_token`/`progress_notifier`
+    simply stay at their `None` defaults, and every watcher-tick hook below
+    already treats a `None` `progress_notifier` as "nothing to do here."
+    Shared by both `start_backtest` (the job itself) and `compare_strategies`
+    (the PARENT job only -- see `_run_compare_strategies`'s own docstring for
+    why children never get their own notifier).
+    """
+    progress_token = _extract_progress_token(ctx)
+    if progress_token is None:
+        return
+    store.set_progress_notifier(
+        job_id,
+        progress_token=progress_token,
+        notifier=_build_progress_notifier(ctx, progress_token),
+    )
+
+
+def _make_single_job_on_tick() -> Callable[[JobRecord], Awaitable[None]]:
+    """Build one `start_backtest` job's `on_tick` hook (see `_watch_until_done`'s
+    `on_tick` parameter).
+
+    Dedup mirrors `JobStore.record_watcher_tick`'s own sample dedup (spec's
+    "avoid overweighting periods where OctoBot hasn't updated progress yet"):
+    a fresh closure per call, so `last_notified` is scoped to exactly one
+    job's watcher lifetime, matching `record_watcher_tick`'s own per-job
+    `samples` dedup rather than reimplementing anything on `JobRecord`
+    itself. A `None` `progress_notifier` (no token was supplied) short-circuits
+    immediately -- this hook is always installed, token or not, so the
+    watcher loop itself never needs to branch on whether one exists.
+    """
+    last_notified: list[float | None] = [None]
+
+    async def on_tick(job: JobRecord) -> None:
+        if job.progress_notifier is None:
+            return
+        if last_notified[0] == job.progress_percent:
+            return
+        last_notified[0] = job.progress_percent
+        await job.progress_notifier(
+            job.progress_percent, _PROGRESS_NOTIFICATION_TOTAL, f"{job.progress_percent:.1f}% complete"
+        )
+
+    return on_tick
+
+
+def _make_compare_strategies_on_tick(
+    store: JobStore, parent_job_id: str, child_ids: list[str]
+) -> Callable[[JobRecord], Awaitable[None]]:
+    """Build one `compare_strategies` job's `on_tick` hook, fired on every CHILD tick.
+
+    Per this milestone's own instruction: a `compare_strategies` job's
+    notifications must carry the COMBINED progress across all children (the
+    same `octobot_mcp.eta.estimate_combined_progress` formula
+    `octobot_mcp.tools.jobs.get_job_status` already uses for polling reads),
+    never a raw single-child percentage -- reusing that pure function here is
+    exactly what keeps this notification path and `get_job_status`'s own
+    polling read reporting the same number for the same instant, computed
+    the same way. `completed_children`/`total_children` are recomputed from
+    the CURRENT store state on every call (cheap: `len(child_ids)` lookups)
+    rather than threaded through as running counters, since children can
+    reach `"completed"` asynchronously relative to exactly when this hook
+    fires for whichever child is currently ticking.
+
+    One closure per `compare_strategies` job (built once by
+    `_run_compare_strategies`, reused across every child in sequence -- see
+    that function), so `last_notified`'s dedup naturally spans the WHOLE
+    comparison run, not just one child's own watcher lifetime -- combined
+    progress is monotonically non-decreasing across children by construction
+    (spec's combined-progress formula), so this dedup never masks a real
+    change the way per-child-only dedup could.
+
+    A `None` parent (evicted) or a parent with no `progress_notifier` (no
+    token was supplied to `compare_strategies`) short-circuits immediately,
+    same as the single-job hook above.
+    """
+    last_notified: list[float | None] = [None]
+
+    async def on_tick(child: JobRecord) -> None:
+        parent = store.get(parent_job_id)
+        if parent is None or parent.progress_notifier is None:
+            return
+        completed_children = sum(
+            1 for other_id in child_ids if (other := store.get(other_id)) is not None and other.state == "completed"
+        )
+        combined_progress = estimate_combined_progress(
+            completed_children=completed_children,
+            total_children=len(child_ids),
+            current_child_progress=child.progress_percent,
+        )
+        if last_notified[0] == combined_progress:
+            return
+        last_notified[0] = combined_progress
+        await parent.progress_notifier(
+            combined_progress,
+            _PROGRESS_NOTIFICATION_TOTAL,
+            f"{combined_progress:.1f}% complete (combined across {len(child_ids)} config(s))",
+        )
+
+    return on_tick
 
 
 def _job_not_found(job_id: str) -> JobNotFoundError:
@@ -532,6 +810,7 @@ async def _watch_until_done(
     *,
     socketio_client_factory: Callable[[], "socketio.AsyncClient"],
     interval_seconds: float,
+    on_tick: Callable[[JobRecord], Awaitable[None]] | None = None,
 ) -> None:
     """Spec's "Background watcher" steps 2-5, for one already-`running` job.
 
@@ -542,6 +821,21 @@ async def _watch_until_done(
     here propagates to `_run_backtest_watcher`'s catch-all -- this
     function itself does not implement INV-1's lock release; its caller's
     `async with` does).
+
+    `on_tick` (milestone 11, docs/tasklist.md item 11) is an OPTIONAL hook
+    called with the just-updated `JobRecord` immediately after every
+    `record_watcher_tick` call, purely additive on top of this loop's
+    existing behavior -- omitting it (the default) reproduces every prior
+    milestone's exact behavior unchanged. It exists so
+    `octobot_mcp.tools.backtesting` can opportunistically send an MCP
+    progress notification from "the same watcher updates as step 8/10" this
+    milestone's own tasklist entry calls for, without this loop needing to
+    know anything about MCP `Context`/tokens/notifications itself -- see
+    `_make_single_job_on_tick`/`_make_compare_strategies_on_tick` for what
+    actually gets passed here. Errors from `on_tick` are caught and logged,
+    never propagated: a notification-hook bug must never fail the job or
+    this watcher loop, the exact same failure-isolation spirit as this
+    function's own stop-confirmation error handling above.
     """
     sio = socketio_client_factory()
     await sio.connect(
@@ -570,12 +864,17 @@ async def _watch_until_done(
                 return
             payload = await channel.request_status()
             elapsed_seconds = time.monotonic() - start_monotonic
-            store.record_watcher_tick(
+            updated = store.record_watcher_tick(
                 job_id,
                 elapsed_seconds=elapsed_seconds,
                 progress_percent=float(payload.get("progress") or 0.0),
                 error_count=int(payload.get("errors") or 0),
             )
+            if on_tick is not None and updated is not None:
+                try:
+                    await on_tick(updated)
+                except Exception as exc:  # noqa: BLE001 -- best-effort: never fail the watcher over this.
+                    _logger.debug("on_tick progress-notification hook raised (best-effort, ignored): %r", exc)
             if payload.get("status") == "finished":
                 report = await _fetch_backtesting_report(client, run_source)
                 store.complete(job_id, result=report)
@@ -593,6 +892,7 @@ async def _run_backtest_watcher(
     *,
     socketio_client_factory: Callable[[], "socketio.AsyncClient"] = socketio.AsyncClient,
     interval_seconds: float = WATCHER_INTERVAL_SECONDS,
+    on_tick: Callable[[JobRecord], Awaitable[None]] | None = None,
 ) -> None:
     """Spec's "Background watcher" steps 1 and 6, wrapping `_watch_until_done`.
 
@@ -601,7 +901,10 @@ async def _run_backtest_watcher(
     `interval_seconds` default to the real client/the real NFR-2 constant
     in production and exist as parameters purely so tests can substitute a
     fake Socket.IO client and a near-zero interval without patching module
-    globals.
+    globals. `on_tick` (milestone 11, docs/tasklist.md item 11) is forwarded
+    unchanged to `_watch_until_done` -- see that function's own docstring;
+    omitting it (the default) changes nothing about this function's prior
+    behavior.
 
     INV-1 (`backtest_execution_lock` released on every code path): the
     entire body runs inside `async with store.backtest_execution_lock`,
@@ -688,6 +991,7 @@ async def _run_backtest_watcher(
                 run_source,
                 socketio_client_factory=socketio_client_factory,
                 interval_seconds=interval_seconds,
+                on_tick=on_tick,
             )
         except Exception as exc:  # noqa: BLE001 -- INV-1: a watcher bug must never leave a job stuck.
             store.fail(job_id, error=f"Unhandled watcher error: {exc}")
@@ -759,6 +1063,16 @@ async def start_backtest(
     the transition to `"running"` and then `progress_percent` advancing;
     call `get_job_result(job_id)` once `state == "completed"`.
 
+    **Progress notifications (milestone 11, ADR-0002 decision point 3):** if
+    this call's MCP request carries a `progressToken`, the watcher also
+    opportunistically emits an MCP progress notification (`progress`/`total`
+    on the same 0-100 scale as `progress_percent`) each time
+    `progress_percent` changes -- entirely optional, additive, and never a
+    substitute for polling: `get_job_status` behaves identically whether or
+    not a token was ever supplied. See `octobot_mcp.tools.backtesting`'s own
+    module-level "Milestone 11" comment block for exactly how this is
+    implemented.
+
     Errors: `BacktestStartFailedError` for an unknown `mode`, a missing
     required field for the chosen mode, or any other start failure;
     `MissingExchangeIdError` specifically for `current_bot_data` mode's
@@ -789,7 +1103,10 @@ async def start_backtest(
     client = get_client(ctx)
     store = get_job_store(ctx)
     job = store.create_job(kind="backtest")
-    task = asyncio.create_task(_run_backtest_watcher(client, store, job.job_id, spec))
+    _attach_progress_notifier(store, ctx, job.job_id)
+    task = asyncio.create_task(
+        _run_backtest_watcher(client, store, job.job_id, spec, on_tick=_make_single_job_on_tick())
+    )
     store.track_watcher_task(job.job_id, task)
     return {"job_id": job.job_id, "state": job.state}
 
@@ -1038,11 +1355,14 @@ async def _watch_child_and_propagate_cancel(
     socketio_client_factory: Callable[[], "socketio.AsyncClient"],
     interval_seconds: float,
     cancel_poll_interval_seconds: float,
+    on_tick: Callable[[JobRecord], Awaitable[None]] | None = None,
 ) -> None:
     """Await one child's full `_run_backtest_watcher` lifecycle, with a
     concurrent poller propagating a parent-level cancel onto it (see
     `_propagate_parent_cancel_to_child`'s own docstring for why this exists
-    at all)."""
+    at all). `on_tick` (milestone 11, docs/tasklist.md item 11) is forwarded
+    unchanged to `_run_backtest_watcher` -- see `_run_compare_strategies`'s
+    own docstring for what it is built to do here."""
     poller = asyncio.create_task(
         _propagate_parent_cancel_to_child(store, parent_job_id, child_id, poll_interval_seconds=cancel_poll_interval_seconds)
     )
@@ -1054,6 +1374,7 @@ async def _watch_child_and_propagate_cancel(
             spec,
             socketio_client_factory=socketio_client_factory,
             interval_seconds=interval_seconds,
+            on_tick=on_tick,
         )
     finally:
         poller.cancel()
@@ -1102,6 +1423,21 @@ async def _run_compare_strategies(
     directly via `store.cancel(child_id)` (still `"queued"`, so this is the
     cheap direct path, never touching the lock) -- and the parent itself is
     finalized as `cancelled` via `confirm_cancelled` once the loop ends.
+
+    **Progress notifications (milestone 11, docs/tasklist.md item 11)**: one
+    `on_tick` hook (`_make_compare_strategies_on_tick`) is built ONCE here,
+    before the per-child loop, and passed to every child's own
+    `_watch_child_and_propagate_cancel` -> `_run_backtest_watcher` call
+    unchanged -- it fires on every child's own tick (whichever child is
+    currently running, since children run strictly sequentially), reads the
+    PARENT's `progress_notifier`/`progress_token` (never a child's -- a
+    `compare_strategies` job's children are never independently callable,
+    so they never get their own token in the first place; see
+    `_attach_progress_notifier`'s own docstring), and reports the COMBINED
+    progress across all children, not this one child's own raw percentage,
+    exactly per this milestone's own instruction. A no-op (checked inside
+    the hook itself) when `compare_strategies`'s own call carried no
+    `progressToken`.
     """
     parent = store.get(parent_job_id)
     if parent is None or parent.state in TERMINAL_STATES:
@@ -1110,6 +1446,7 @@ async def _run_compare_strategies(
         # mirrors _run_backtest_watcher's identical guard for one job.
         return
     store.start(parent_job_id)
+    on_tick = _make_compare_strategies_on_tick(store, parent_job_id, child_ids)
     try:
         cancelled = False
         for child_id, spec in zip(child_ids, specs, strict=True):
@@ -1129,6 +1466,7 @@ async def _run_compare_strategies(
                 socketio_client_factory=socketio_client_factory,
                 interval_seconds=interval_seconds,
                 cancel_poll_interval_seconds=cancel_poll_interval_seconds,
+                on_tick=on_tick,
             )
             parent = store.get(parent_job_id)
             if parent is not None and parent.cancel_requested:
@@ -1190,6 +1528,14 @@ async def compare_strategies(ctx: Context, configs: list[dict[str, Any]], name: 
     synchronously before this function returns). Poll `get_job_status(job_id)`
     for combined progress/ETA and each child's own live state
     (`sub_jobs`); call `get_job_result(job_id)` once `state == "completed"`.
+
+    **Progress notifications (milestone 11, ADR-0002 decision point 3):** if
+    THIS call (the parent) carries a `progressToken`, notifications report
+    the COMBINED progress across all children (the exact same formula
+    `get_job_status` already uses for polling reads), never one child's own
+    raw percentage -- see `_run_compare_strategies`/
+    `_make_compare_strategies_on_tick`'s own docstrings. Children are never
+    independently callable, so they never carry their own token.
     """
     if len(configs) < 2:
         raise CompareStrategiesStartFailedError(f"compare_strategies requires at least 2 configs (got {len(configs)}).")
@@ -1215,6 +1561,7 @@ async def compare_strategies(ctx: Context, configs: list[dict[str, Any]], name: 
     store = get_job_store(ctx)
     child_ids = [store.create_job("backtest").job_id for _ in specs]
     parent = store.create_job("compare_strategies", child_job_ids=child_ids)
+    _attach_progress_notifier(store, ctx, parent.job_id)
     task = asyncio.create_task(_run_compare_strategies(client, store, parent.job_id, child_ids, configs, specs))
     store.track_watcher_task(parent.job_id, task)
     return {"job_id": parent.job_id, "state": parent.state, "sub_job_count": len(specs)}

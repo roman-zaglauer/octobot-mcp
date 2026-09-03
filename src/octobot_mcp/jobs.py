@@ -33,6 +33,20 @@ pure `octobot_mcp.eta.estimate_eta`/`bound_samples` functions to actually
 compute `eta_seconds`/`eta_confidence` and bound `samples` -- this module
 still does not talk to OctoBot/Socket.IO/HTTP itself; `octobot_mcp.eta` is
 equally free of any such I/O.
+
+Milestone 11 (docs/tasklist.md item 11, `octobot_mcp.tools.backtesting`) adds
+two more opaque, purely-optional `JobRecord` fields -- `progress_token` and
+`progress_notifier` -- plus `JobStore.set_progress_notifier`, so a job created
+from a tool call that supplied an MCP `progressToken` can later be notified
+from the background watcher task, *after* that original tool call has already
+returned (ADR-0002 decision point 3's "convenience layer on top" of polling).
+This module still does not know anything about MCP `Context`/`ServerSession`/
+Socket.IO/HTTP -- `progress_notifier` is stored and read back as an opaque
+`Callable`, built and invoked entirely by `octobot_mcp.tools.backtesting`
+(the one module that actually imports MCP SDK types), so this store's own
+"pure infrastructure" framing above still holds: it holds the reference the
+same way `track_watcher_task` holds an `asyncio.Task` reference, without
+itself ever calling it.
 """
 
 from __future__ import annotations
@@ -43,6 +57,7 @@ import time
 import uuid
 from asyncio import Lock
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -104,6 +119,24 @@ class JobRecord:
     child_job_ids: list[str] | None = None
     cancel_requested: bool = False
     octobot_run_source: str | None = None
+    progress_token: str | int | None = None
+    """Milestone 11: the caller-supplied MCP `progressToken`, verbatim, if the
+    tool call that created this job carried one (`ctx.request_context.meta`'s
+    `progress_token` key) -- `None` when no token was supplied (the expected,
+    fully-supported common case). Kept mostly for introspection/debugging;
+    `progress_notifier` below is what actually sends notifications."""
+    progress_notifier: Callable[[float, float | None, str | None], Awaitable[None]] | None = None
+    """Milestone 11: an opaque `(progress, total, message) -> None` async
+    callable that sends one MCP progress notification for THIS job's
+    `progress_token`, or `None` when no token was supplied. Built by
+    `octobot_mcp.tools.backtesting` from the original tool call's `ctx.session`
+    (the one MCP SDK object that can still send a notification after that
+    call has returned -- see that module's docstring for why `ctx.session`
+    specifically, not `ctx` itself, is what must be captured) and attached via
+    `JobStore.set_progress_notifier`. This store never calls it -- only reads
+    it back for `octobot_mcp.tools.backtesting`'s own watcher-tick hook to
+    invoke, so this module stays free of any MCP-SDK-specific behavior (see
+    this module's own docstring)."""
 
     def elapsed_seconds(self) -> float:
         """Elapsed time since creation, computed live (never stored statically).
@@ -373,6 +406,36 @@ class JobStore:
                 )
 
         task.add_done_callback(_on_done)
+
+    def set_progress_notifier(
+        self,
+        job_id: str,
+        *,
+        progress_token: str | int | None,
+        notifier: Callable[[float, float | None, str | None], Awaitable[None]] | None,
+    ) -> None:
+        """Attach milestone 11's opportunistic MCP progress-notification sender to a job.
+
+        Called once, right after `create_job`, by `octobot_mcp.tools.
+        backtesting.start_backtest`/`compare_strategies` -- but only when the
+        original tool call actually carried a `progressToken` (both
+        `progress_token`/`notifier` are `None` otherwise, and callers should
+        simply not call this at all in that case; it is not required for
+        every job). A no-op if `job_id` is unknown (e.g. raced with eviction,
+        though this should never actually happen since it is always called
+        immediately after the same `create_job` call that minted `job_id`).
+
+        This is intentionally NOT a state-machine transition (unlike
+        `start`/`complete`/`fail`/`cancel`): it never touches `state` or any
+        other field, and can be called on a job in any state -- it only
+        records where a later watcher tick should send a notification, if it
+        decides one is warranted (see `octobot_mcp.tools.backtesting`'s own
+        watcher-tick hook for that decision).
+        """
+        job = self._jobs.get(job_id)
+        if job is not None:
+            job.progress_token = progress_token
+            job.progress_notifier = notifier
 
     def _evict_stale_terminal_jobs(self) -> None:
         """NFR-9: evict terminal records past TTL, then past the retention cap.
