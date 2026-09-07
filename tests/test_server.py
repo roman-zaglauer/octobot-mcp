@@ -22,15 +22,17 @@ the remaining confirm-gated tools (`clear_orders_history`/
 `update_exchange_credentials`); milestone 13 (item 13) adds
 `get_tentacle_config`/`update_tentacle_config`/`export_logs` (Tier A) and
 the Tier-C stubs `list_tentacles`/`get_logs` (ADR-0006 -- neither ever
-makes an HTTP call).
+makes an HTTP call); milestone 13.5 (item 13.5) adds `update_trading_config`,
+closing a backlog gap (spec FR-21, never assigned to a tasklist milestone
+until now) -- not confirm-gated, `POST /config`'s `trading_config` branch.
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
 `test_tools_portfolio.py`/`test_tools_exchanges.py`/`test_tools_profiles.py`/
 `test_tools_profiles_gated.py`/`test_tools_jobs.py`/`test_tools_backtesting.py`/
-`test_tools_tentacles.py` for per-tool behavior and
-`test_server_tools_integration.py` for an end-to-end call through this same
-`mcp` wiring.
+`test_tools_tentacles.py`/`test_tools_trading_config.py` for per-tool
+behavior and `test_server_tools_integration.py` for an end-to-end call
+through this same `mcp` wiring.
 
 Since milestone 3 also wires `mcp`'s real `app_lifespan` (NFR-11) into
 this module-level `mcp` instance, connecting a `Client` to it now runs
@@ -44,7 +46,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_13_TOOL_NAMES = {
+EXPECTED_MILESTONE_13_5_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -79,6 +81,7 @@ EXPECTED_MILESTONE_13_TOOL_NAMES = {
     "list_tentacles",
     "get_logs",
     "export_logs",
+    "update_trading_config",
 }
 
 
@@ -95,9 +98,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_13_tools(client: Client):
+async def test_server_lists_the_milestone_13_5_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_13_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_13_5_TOOL_NAMES
 
 
 @pytest.mark.anyio

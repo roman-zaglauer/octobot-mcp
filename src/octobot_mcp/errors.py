@@ -160,6 +160,21 @@ more:
   `octobot_mcp.tools.profiles.export_profile` already uses) -- matching
   this project's established convention that only *mutations* needing a
   domain-specific outcome get their own error class.
+
+Milestone 13.5 (docs/tasklist.md item 13.5, closing the `update_trading_config`
+backlog gap) adds one more:
+- `TradingConfigUpdateRejectedError` -- `update_trading_config` failed.
+  Wraps OctoBot's own error text from `POST /config`'s `trading_config`
+  branch (confirmed against source `Services/Interfaces/web_interface/
+  controllers/configuration.py::config()`): unlike `update_exchange_credentials`'s
+  `global_config` branch of this SAME route, the `trading_config` branch's
+  failures never populate the route's `err_message` local variable (it's
+  only ever reassigned by the `global_config`/`removed_elements` branches),
+  so this tool's own extracted error text is always an empty string in
+  practice -- see `octobot_mcp.tools.trading_config`'s module docstring for
+  the full derivation. Not confirm-gated (ADR-0003): mutates strategy/
+  tentacle activation config, does not destroy data, expose credentials, or
+  enable live trading.
 """
 
 from __future__ import annotations
@@ -409,4 +424,22 @@ class TentacleConfigUpdateRejectedError(OctoBotAPIError):
     full verified request/response shape and the spec correction it
     documents (the tentacle name is a query parameter, not a JSON body
     field).
+    """
+
+
+class TradingConfigUpdateRejectedError(OctoBotAPIError):
+    """`update_trading_config` failed (milestone 13.5).
+
+    Wraps OctoBot's own error text from `POST /config`'s `trading_config`
+    branch (confirmed against source `Services/Interfaces/web_interface/
+    controllers/configuration.py::config()`). Not confirm-gated (ADR-0003):
+    mutates strategy/tentacle activation config, does not destroy data,
+    expose credentials, or enable live trading. See
+    `octobot_mcp.tools.trading_config.update_trading_config`'s docstring for
+    the full verified request/response shape, including the genuine spec
+    correction it documents: the extracted error text is always an empty
+    string in practice for this tool's own failures, never a substantive
+    message, because the route's `err_message` variable is only ever
+    populated by its `global_config`/`removed_elements` branches, which this
+    tool never triggers.
     """

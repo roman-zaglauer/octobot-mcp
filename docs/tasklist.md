@@ -131,6 +131,21 @@ global project standards.
     tentacle's config; calling `list_tentacles`/`get_logs` returns a clear,
     non-error explanation rather than a failure.
 
+13.5. **`update_trading_config` — closing a backlog gap.**
+    Added to the spec (FR-21) and ADR-0003's non-gated-tools rationale
+    during milestone 5's review, but never assigned to a tasklist item, so
+    it was never implemented. `update_trading_config(patch)` → `POST
+    /config`'s `TRADING_CONFIG_KEY` branch (already `[V]`-verified in the
+    spec: reads `request_data[TRADING_CONFIG_KEY]`, calls
+    `models.update_tentacles_activation_config(...)`, the same function the
+    `TENTACLES_CONFIG_KEY`/`EVALUATOR_CONFIG_KEY` branches also call).
+    Output: `{"trading_updated_config": <passthrough of OctoBot's own
+    echoed value for this key>}`. Not confirm-gated (mutates
+    strategy/tentacle activation config, does not destroy data, expose
+    credentials, or enable live trading). Demo: agent updates the trading
+    config for the current profile and sees the change reflected in the
+    echoed output.
+
 14. **Error handling / resilience polish pass.**
     Sweep every tool for NFR-4/NFR-5 compliance (timeout present,
     error classified, no raw stack traces reaching the MCP client);
