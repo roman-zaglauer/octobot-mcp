@@ -26,6 +26,16 @@ tentacles/logs where a real endpoint exists.
 - A5: Some read capabilities (profile discovery) depend on scraping one
   HTML page whose exact rendered structure has been verified against source
   but **not yet against the live instance** (see open questions).
+- A6 (added for the historical-data-collection addendum, ADR-0007): OctoBot
+  enforces its own "one data collection run at a time" limit, independent
+  of its "one backtest at a time" limit (A4) — confirmed to be a distinct
+  resource guarded by a distinct internal reference, not the same
+  constraint reused. This server serializes its own `start_data_collection`
+  submissions via a dedicated lock to match, separate from the backtest
+  lock; a human using OctoBot's own web UI concurrently could still trigger
+  OctoBot's own "already running" guard against an MCP-initiated
+  collection, surfaced as a classified `DataCollectionStartFailedError`
+  rather than a raw failure.
 
 ## Functional requirements
 
@@ -53,6 +63,17 @@ tentacles/logs where a real endpoint exists.
 | FR-20 | The server SHALL expose `get_logs` and `list_tentacles` (enumerate-all) as discoverable tools that return a structured "not available in v1" result rather than omitting the capability silently. | MUST | Calling either tool returns a structured response with a clear reason and a suggested alternative (`export_logs`, `get_tentacle_config`), never a raw 404/exception. |
 | FR-21 | The server SHALL provide a tool to update trading-mode (strategy/tentacle-activation) configuration for the current profile, matching the "trading config" domain named in scope. | SHOULD | Given a valid patch, when `update_trading_config` is called, then OctoBot's stored trading config reflects the patch (via `POST /config`'s `TRADING_CONFIG_KEY` branch) and the tool returns the updated fields; not confirm-gated (mutates config, does not destroy data or expose credentials). |
 
+### Historical data collection (added addendum — genuinely new scope, ADR-0007/ADR-0008; not in v1's original curated scope)
+
+| ID | Requirement | Priority | Acceptance criterion |
+|---|---|---|---|
+| FR-22 | The server SHALL provide a tool to start a historical data collection run against a given exchange/symbols (optionally timeframes and a date range), returning a `job_id` immediately (no blocking), following the same async job pattern as `start_backtest` (ADR-0002/ADR-0007). | MUST | When `start_data_collection` is called with a valid `exchange` and non-empty `symbols`, then the call returns within 2s with a `job_id` and `state: "queued"`, without waiting for the collection to finish. |
+| FR-23 | `get_job_status`, `list_jobs`, `cancel_job`, and `get_job_result` SHALL each support jobs of `kind: "data_collection"` with the same semantics they already provide for `kind: "backtest"` (progress/ETA visibility, cancellation, final-result retrieval), per ADR-0007. | MUST | Given a `job_id` for a running data-collection job, `get_job_status` returns `progress_percent`/`elapsed_seconds`/`eta_seconds`/`eta_confidence` in the same shape as for a backtest job; `cancel_job` transitions it to `cancelled`; `get_job_result` on a `completed` data-collection job returns `{"exchange", "symbols", "time_frames", "start_timestamp", "end_timestamp", "message"}` without fabricating a filename OctoBot itself never reports. |
+| FR-24 | The server SHALL provide a tool to list historical data files already present on the OctoBot instance, including the exact identifier `delete_data_file` expects (ADR-0008, Tier B). | MUST | Given the OctoBot instance has ≥1 previously collected/imported data file, when `list_data_files` is called, the result includes each file's `file`/`exchange`/`symbols`/`time_frames` and its full-vs-partial date-range fields; the tool raises a distinct, named error (never a silent empty list) if the underlying scrape's structural assumptions don't hold. |
+| FR-25 | The server SHALL provide a tool to delete a historical data file by the identifier `list_data_files` returns, gated by `confirm=true` (ADR-0003). | SHOULD | Given a valid `file` identifier and `confirm` omitted/false, when `delete_data_file` is called, then no deletion occurs and a refusal explaining the required flag is returned. Given `confirm=true`, then the file is deleted. (User-confirmed decision, reversing this addendum's original not-gated draft call: an erroneous delete means re-running a collection that can take minutes to hours, unlike the instantly-correctable `cancel_order`/`close_position`, placing this closer to `clear_*_history`'s risk profile per ADR-0003's actual purpose.) |
+| FR-26 | The server SHALL provide a tool to upload an existing OctoBot-format historical data file to the instance without collecting it via an exchange. | SHOULD | Given a valid file payload, when `import_data_file` is called, then the file is saved on the OctoBot instance and the tool returns a confirmation/message; not confirm-gated (creates new state, does not destroy data). |
+| FR-27 | The server SHALL provide read tools for the exchange-scoped symbol list and available timeframe list a data collection run may target. | SHOULD | Given a valid `exchange`, `get_available_symbols_for_collection`/`get_available_timeframes_for_collection` each return the same list OctoBot's own `/data_collector` `symbol_list`/`available_timeframes_list` JSON actions return, with no scraping involved. This requirement's symbols half MAY be satisfied by reusing the existing `get_all_symbols` tool instead of adding a new one, if a developer confirms it returns equivalent data for the same exchange (see tool spec's developer note); the timeframes half has no existing equivalent and MUST be a new tool regardless. |
+
 ## Non-functional requirements (ASRs)
 
 | ID | Category | Requirement | Measurable target | Verification |
@@ -69,6 +90,9 @@ tentacles/logs where a real endpoint exists.
 | NFR-10 | Extensibility (auth) | The HTTP/Socket.IO client construction SHALL be isolated behind one factory function so future session-cookie auth (ADR-0005) is a localized change. | Adding login support touches ≤2 files (client factory + one new login step) without changing tool implementations. | Code review at implementation time. |
 | NFR-11 | Extensibility (multi-instance) | Tool implementations SHALL NOT hardcode the single client instance as a module-level global accessed by name from arbitrary call sites; SHALL receive it via a single injected context object. | Adding a second instance later requires changing the context-construction site only, not each tool. | Code review. |
 | NFR-12 | Scrape reliability | The Tier-B `/profiles_selector` scrape adapter (ADR-0006) SHALL fail loudly (raise a distinct, named exception) if expected structure is missing, never silently return a partial/empty result indistinguishable from "no profiles exist." | 100% of a test suite that mutates the fixture HTML's expected nodes triggers the distinct exception, not a fallback empty list. | Unit tests against both a valid and a deliberately-broken HTML fixture. |
+| NFR-13 | Scrape reliability (second adapter) | The Tier-B `/data_collector` scrape adapter backing `list_data_files` (ADR-0008) SHALL fail loudly (a distinct, named exception, `DataFileScrapeContractBrokenError`, never conflated with `ProfileScrapeContractBrokenError`) if expected structure is missing, never silently return a partial/empty result indistinguishable from "no data files exist." | 100% of a test suite that mutates the fixture HTML's expected nodes triggers the distinct exception, not a fallback empty list. | Unit tests against both a valid and a deliberately-broken HTML fixture, mirroring NFR-12's test structure. |
+| NFR-14 | Reuse / consistency | Data-collection job progress/ETA SHALL be computed by the same generic `octobot_mcp.eta` algorithm already used for backtest jobs, with no data-collection-specific ETA logic added (ADR-0007). | 0 new branches/functions in `octobot_mcp.eta` attributable to data-collection jobs; the only new code is the nested-step → flat-percent conversion, which lives in the data-collection watcher, not the ETA module. | Code review at implementation time. |
+| NFR-15 | Concurrency correctness | The server SHALL serialize its own `start_data_collection` submissions via a lock independent of `backtest_execution_lock` (ADR-0007), reflecting OctoBot's own two independent one-at-a-time constraints. | A concurrent `start_backtest` + `start_data_collection` pair does not block on each other's lock; two concurrent `start_data_collection` calls do serialize via `data_collection_execution_lock`. | Unit test asserting both locks are acquired/released independently. |
 
 ## Data requirements
 - Profile identity: OctoBot's `profile_id` is the sole stable identifier used
@@ -129,6 +153,57 @@ tentacles/logs where a real endpoint exists.
    callers) to confirm valid values **before** the backtest-watcher
    milestone (tasklist step 8) — do not implement against assumed values.
 
+The following are new for the historical-data-collection addendum
+(ADR-0007/ADR-0008), continuing the same numbering:
+
+7. **Exact DOM/value type behind `list_data_files`'s `file` field** —
+   verified against the Jinja template's markup in source
+   (`{{file}}`/`data-file={{file}}`) but not against the live instance's
+   actual rendered output; specifically unconfirmed whether `file` is a
+   bare filename string or a `str()`-rendered path-like object with a
+   directory prefix. Developer must fetch and inspect the live
+   `/data_collector` page before finalizing the scrape's `file`-field
+   extraction and before wiring `delete_data_file` against its output (see
+   ADR-0008's risk table).
+8. **Units (milliseconds vs. seconds) for `start_data_collection`'s
+   `start_timestamp`/`end_timestamp`** — the controller/model dispatch is
+   confirmed from source (`models.collect_data_file(exchange, symbols,
+   time_frames, start_timestamp, end_timestamp)`), but
+   `_background_collect_exchange_historical_data`'s body (where any
+   unit conversion would happen, mirroring `_start_backtesting`'s
+   confirmed divide-by-1000 for `start_backtest`) was not read this
+   session. Developer must confirm before implementing — default
+   assumption (documented, not silently guessed): milliseconds, matching
+   this project's existing convention for `start_backtest`'s equivalent
+   fields, until proven otherwise.
+9. **Indexing/bounds of `get_data_collector_status()`'s `current_step`/
+   `total_steps`** — the function's return shape is fully confirmed from
+   source (see ADR-0007), but whether `current_step` is 0- or 1-indexed,
+   and whether it can transiently exceed `total_steps`, is not. This
+   directly affects the nested-step → flat-percent `progress_percent`
+   conversion formula ADR-0007 specifies (which already clamps
+   defensively to `[0, 100]` regardless). Developer must capture a real
+   multi-step collection's raw progress sequence against the live
+   instance before finalizing the formula (ADR-0007's first risk-table
+   entry).
+10. **`_ensure_backtesting_limits`'s exact validation rules/message text**
+    — `collect_data_file`'s source confirms this function is called and
+    can reject a request with a message this tool would surface as
+    `DataCollectionStartFailedError`, but the function's own body
+    (plausibly a plan/tier-based duration or symbol-count cap) was not
+    read this session. Developer should read it before writing this
+    tool's docstring, so an agent isn't left guessing why a seemingly
+    valid request was rejected.
+11. **Whether a genuine mid-collection OctoBot-side failure (e.g. an
+    unhandled exception inside `_background_collect_exchange_historical_data`)
+    produces any distinguishable status signal** beyond the four
+    enumerated values (`"not started"`/`"starting"`/`"collecting"`/
+    `"finished"`) confirmed in `get_data_collector_status()`'s source —
+    not confirmed either way this session. ADR-0007 documents the
+    accepted fallback (rely on generic ETA staleness detection, NFR-3) if
+    this remains unconfirmed; a developer who does confirm a distinguishable
+    failure signal should wire it directly into `store.fail(...)` instead.
+
 ## Traceability
 Source material: OctoBot GitHub (Drakkar-Software/OctoBot, `master` branch,
 `packages/tentacles/Services/Interfaces/web_interface/**`), plus the original
@@ -136,3 +211,14 @@ live-instance route scrape recorded in `docs/info.md` and this session's
 research. Downstream artefacts: `docs/specs/octobot-mcp-tool-spec.md`
 (implementable contracts), `docs/tasklist.md` (developer sequencing), ADRs
 0001–0006 (rationale for the constraints these requirements assume).
+
+The historical-data-collection addendum (FR-22..FR-27, NFR-13..NFR-15, A6,
+open questions 7–11) traces additionally to: OctoBot GitHub
+(Drakkar-Software/OctoBot-Tentacles, `master` branch,
+`Services/Interfaces/web_interface/{controllers,websockets,models}/
+backtesting.py`, `templates/data_collector.html`), read directly this
+session; and ADR-0007 (async job model decision)/ADR-0008 (Tier-B scrape
+decision) for the rationale. Downstream: the same
+`docs/specs/octobot-mcp-tool-spec.md` and `docs/tasklist.md`, extended
+additively (new tasklist item, new tool-spec section) rather than modified
+in place.

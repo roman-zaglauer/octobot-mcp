@@ -207,13 +207,201 @@ listed under the requirements doc's "Out of scope" section.
 | `get_logs(...)` | R | no | n/a | Tier C — returns `{"available": false, "reason": "...", "alternative": "export_logs"}` |
 | `export_logs()` | R | no | `GET /export_logs` | [V] |
 
+---
+
+### Historical data collection (addendum — ADR-0007/ADR-0008; genuinely new scope, not in v1's original inventory)
+
+| Tool | R/W | Confirm | Maps to | Tier |
+|---|---|---|---|---|
+| `start_data_collection(exchange, symbols, time_frames?, start_timestamp?, end_timestamp?)` | W | no | `POST /data_collector?action_type=start_collector` | [V] (route/body/one-at-a-time guard); [UNVERIFIED] timestamp units, Q8 |
+| `get_job_status(job_id)` / `list_jobs(state?, kind?)` / `cancel_job(job_id)` / `get_job_result(job_id)` | R/W | no | **reused unchanged** for `kind: "data_collection"` (see "Job store extension" below) | n/a |
+| `list_data_files()` | R | no | scrape `GET /data_collector` (bare) | Tier B — [UNVERIFIED live DOM shape, Q7] |
+| `delete_data_file(file, confirm)` | W | **yes** | `POST /data_collector?action_type=delete_data_file` | [V] |
+| `import_data_file(file_base64, filename)` | W | no | `POST /data_collector?action_type=import_data_file` (multipart) | [V] |
+| `get_available_symbols_for_collection(exchange)` | R | no | `GET /data_collector?action_type=symbol_list&exchange=<name>` | [V] |
+| `get_available_timeframes_for_collection(exchange)` | R | no | `GET /data_collector?action_type=available_timeframes_list&exchange=<name>` | [V] |
+
+No dedicated `stop_data_collection` tool exists — `cancel_job(job_id)` is
+reused as-is (ADR-0007 decision point 2), the same way there is no
+dedicated `stop_backtest` tool today.
+
+**Confirm-gating decisions, applying ADR-0003's existing framework
+explicitly (per this addendum's own instruction to make the call, not
+leave it implicit):**
+- `start_data_collection`: **not gated.** Starts a simulation-adjacent
+  background download, never touches live trading, destroys no data, and
+  exposes no credentials — same reasoning as `start_backtest`'s own
+  not-gated classification.
+- `import_data_file`: **not gated.** Creates new state (a saved file);
+  destroys nothing.
+- `delete_data_file`: **gated, `confirm=true` required (reversed from this
+  addendum's original draft call).** The architect's initial classification
+  (not gated, reasoning: a re-collectable local cache, not trading
+  history/credentials/curated config) was reviewed and the user, persuaded
+  by the reviewer's counter-argument, explicitly overrode it. The
+  controlling reasoning, recorded here for traceability: ADR-0003's actual
+  purpose is protecting against an ambiguous/mistaken batch instruction
+  before a human notices — and unlike `cancel_order`/`close_position`
+  (instantly correctable: re-place the order, the position re-opens on the
+  next signal), an erroneous `delete_data_file` call means re-running a
+  collection that can take minutes to hours (per this addendum's own
+  `start_data_collection`). That asymmetry — cheap-to-undo vs.
+  expensive-to-redo — places `delete_data_file` closer to
+  `clear_*_history`'s risk profile than to `cancel_order`/`close_position`'s,
+  even though the *data itself* is technically re-derivable rather than
+  permanently lost. Implemented via the same shared `require_confirmation`
+  helper every other gated tool uses (NFR-7), never bespoke per-tool logic.
+- `list_data_files`/`get_available_symbols_for_collection`/
+  `get_available_timeframes_for_collection`: read-only, not gated (no
+  gating question applies).
+
+#### `start_data_collection(exchange, symbols, time_frames?, start_timestamp?, end_timestamp?)`
+- Input: `{"exchange": str, "symbols": [str], "time_frames"?: [str],
+  "start_timestamp"?: int, "end_timestamp"?: int}` — maps 1:1 to
+  `collect_data_file(exchange, symbols, time_frames=None, start_timestamp=None,
+  end_timestamp=None)` [V]. `time_frames`/`start_timestamp`/`end_timestamp`
+  are all optional (OctoBot's own defaults, confirmed from the function
+  signature). **Timestamp units are [UNVERIFIED]** — see requirements doc
+  Q8; implement assuming milliseconds (this project's existing convention)
+  until a developer confirms otherwise.
+- Behavior (ADR-0007): creates a `kind: "data_collection"` job, acquires
+  `JobStore.data_collection_execution_lock` (a lock independent of
+  `backtest_execution_lock` — ADR-0007 decision point 3/NFR-15), POSTs the
+  start action, and — on success — spawns a background watcher connecting
+  to OctoBot's `/data_collector` Socket.IO namespace exactly as
+  `start_backtest`'s watcher does for `/backtesting` (same non-ack
+  emit/await-response bridge, same `WATCHER_INTERVAL_SECONDS` tick
+  interval, same INV-1 lock-released-in-`finally` guarantee, same
+  `queued→cancelled` race handling).
+- Progress conversion (ADR-0007 decision point 4): each tick's
+  `{"status": ..., "progress": {"current_step": int, "total_steps": int,
+  "current_step_percent": int}}` payload [V] is converted to the flat
+  `progress_percent` `JobStore.record_watcher_tick` expects via
+  `0.0 if total_steps <= 0 else clamp(((current_step - 1) * 100 +
+  current_step_percent) / total_steps, 0, 100)` — **the 1-indexing
+  assumption on `current_step` is [UNVERIFIED]**, see requirements doc Q9;
+  `error_count` is always passed `0` (no equivalent field exists in this
+  payload, confirmed from source).
+- Output: `{"job_id": str, "state": "queued"}` — same shape/timing
+  guarantee as `start_backtest`'s output.
+- Supports `progressToken` (ADR-0002 decision point 3 / ADR-0007 decision
+  point 4), reusing `_extract_progress_token`/`_build_progress_notifier`/
+  `_attach_progress_notifier` — **these should be moved from
+  `octobot_mcp.tools.backtesting` to `octobot_mcp.tools._shared`** as part
+  of this milestone (this module becomes their second consumer; see
+  `_shared.py`'s own docstring precedent for `_parse_content_disposition_filename`).
+- Errors: `DataCollectionStartFailedError` wrapping OctoBot's own `reply`
+  text on a failed start (confirmed failure messages include "Backtesting
+  is disabled.", "Please select an exchange.", "Please select a trading
+  pair.", `_ensure_backtesting_limits`'s own message [UNVERIFIED text,
+  Q10], and "Can't collect data for {symbols} on {exchange} (Historical
+  data collector is already running)" for OctoBot's own one-at-a-time
+  guard).
+
+#### Job store extension for `kind: "data_collection"` (ADR-0007)
+- `octobot_mcp.jobs.JobKind` widens to `Literal["backtest",
+  "compare_strategies", "data_collection"]`. **No other change to
+  `JobStore`'s methods is required** — `create_job`/`start`/`complete`/
+  `fail`/`cancel`/`confirm_cancelled`/`record_watcher_tick`/`append_error`/
+  `track_watcher_task`/`set_progress_notifier` are already fully
+  kind-agnostic (verified this session by re-reading `jobs.py` in full —
+  see ADR-0007's Context section for the exact proof). `JobStore` gains one
+  new field, `data_collection_execution_lock: asyncio.Lock`, initialized
+  the same way `backtest_execution_lock` already is.
+- `octobot_mcp.tools.jobs` (`get_job_status`/`list_jobs`/`cancel_job`)
+  **requires no code changes at all** — `_job_status_payload`'s only
+  kind-specific branch already treats any non-`compare_strategies` kind
+  generically (confirmed this session).
+- `octobot_mcp.tools.backtesting.get_job_result` gains **one new branch**:
+  `elif job.kind == "data_collection": return job.result`. The stored
+  `result` (set once at `state="completed"`, INV-3 unchanged) is:
+  `{"exchange": str, "symbols": [str], "time_frames": [str]|null,
+  "start_timestamp": int|null, "end_timestamp": int|null, "message": str}`
+  — deliberately does not include a resulting filename (OctoBot itself
+  names none anywhere in this flow, confirmed from source); the tool
+  description instructs the agent to call `list_data_files()` afterward.
+  Consider relocating `get_job_result` to a kind-dispatching shared
+  location if a fourth job kind is ever added — not necessary at two/three
+  kinds.
+
+#### `list_data_files()`
+- Input: `{}`.
+- Output: `{"files": [{"file": str, "exchange": str, "symbols": [str],
+  "time_frames": [str], "is_full": bool, "start_date": str|null,
+  "end_date": str|null, "date": str|null, "candles_length": int|null}]}`
+  — see ADR-0008 for the exact scrape target (`tr.selectable_datafile`) and
+  field-to-markup mapping.
+- Errors: `DataFileScrapeContractBrokenError` (NFR-13) if the page
+  structure doesn't match expectations — never returns an empty list
+  silently in that case (mirrors `list_profiles`'s own INV-5-style
+  discipline exactly, via a distinct exception class per ADR-0008 decision
+  point 3).
+- Idempotent, read-only. The `file` field is the authoritative value to
+  pass to `delete_data_file`.
+
+#### `delete_data_file(file, confirm=false)`
+- Input: `{"file": str, "confirm": bool}` — `file` is whatever
+  `list_data_files` returned in its `file` field, passed through verbatim
+  as the request body once confirmed (confirmed from source:
+  `flask.request.get_json()`'s raw value is passed straight to
+  `backtesting_api.delete_data_file(file_name)`, no wrapping object).
+- Behavior: if `confirm != true` →
+  `require_confirmation("delete_data_file", file, "This permanently deletes
+  the historical data file; re-collecting it via start_data_collection can
+  take minutes to hours depending on the date range.")`, no OctoBot call
+  made — same shared-helper pattern as `delete_profile`/`clear_orders_history`
+  (NFR-7). If `confirm == true` → proceed with the delete request.
+- Output on success: `{"file": str, "deleted": true, "message": str}`.
+- Errors: `DataFileDeleteRejectedError` wrapping OctoBot's own `f"Can't
+  delete {file_name} ({error})"` text [V].
+- **Gated: requires `confirm=true`** — see the framework discussion above
+  (reversed from this addendum's original not-gated draft; user-confirmed
+  decision, applying ADR-0003's actual purpose per the reviewer's
+  argument).
+
+#### `import_data_file(file_base64, filename)`
+- Input: `{"file_base64": str, "filename": str}` — mirrors
+  `create_profile(mode="import_file")`'s existing multipart-upload pattern
+  exactly (base64-decode, then a multipart `file` field named `filename`,
+  matching OctoBot's own `werkzeug.utils.secure_filename(...)` handling
+  [V]).
+- Output: `{"filename": str, "imported": true, "message": str}` (OctoBot's
+  own success message from `models.save_data_file`, confirmed [V]).
+- Errors: `DataFileImportFailedError` wrapping OctoBot's own `f"Error when
+  saving file: {e}. File can't be saved."` text [V].
+- Not confirm-gated — creates new state, destroys nothing.
+
+#### `get_available_symbols_for_collection(exchange)` / `get_available_timeframes_for_collection(exchange)`
+- Input: `{"exchange": str}` for each.
+- Output: `{"symbols": [str]}` / `{"time_frames": [str]}` respectively —
+  direct passthrough of OctoBot's own sorted JSON arrays [V].
+- Errors: generic `OctoBotClientError`/`OctoBotServerError` (no dedicated
+  exception class — these are plain reads with no domain-specific failure
+  mode, matching this project's existing convention for read-only tools).
+- **Developer note (non-blocking):** `get_available_symbols_for_collection`
+  may overlap with the already-shipped `get_all_symbols(exchange)` tool
+  (`GET /api/get_all_symbols/<exchange>`) — both ultimately load ccxt
+  market data for the given exchange, but this was not confirmed to return
+  identical data this session. Verify before implementation; if equivalent,
+  prefer reusing `get_all_symbols` and drop this tool rather than shipping
+  a duplicate.
+
+---
+
 ## Job store design
+
+**Updated by the historical-data-collection addendum (ADR-0007) — this is
+now the canonical, current-state description of `JobRecord`/concurrency,
+not the original v1-only shape.** The "Job store extension for `kind:
+'data_collection'`" subsection above is the addendum's own change-log
+(what changed and why); this section reflects the *result* of that change
+directly, so a reader of this section alone never sees a stale picture.
 
 ### Data model
 ```
 JobRecord:
   job_id: str (uuid4)
-  kind: "backtest" | "compare_strategies"
+  kind: "backtest" | "compare_strategies" | "data_collection"
   state: "queued" | "running" | "completed" | "failed" | "cancelled"
   created_at, started_at, finished_at: float (monotonic + wall-clock pair)
   progress_percent: float  # 0-100
@@ -226,17 +414,38 @@ JobRecord:
   cancel_requested: bool
   octobot_run_source: str | None    # OctoBot's own "source" identifier for this run
 ```
+(`kind: "data_collection"` added by ADR-0007; no other field changed —
+`JobRecord`/`JobStore` were already generic enough to accommodate it with
+no structural change, see ADR-0007's Context section for the verification
+this rested on.)
 
 ### Concurrency
-- One process-wide `asyncio.Lock` (`backtest_execution_lock`), reflecting
-  OctoBot's real one-run-at-a-time constraint (ADR-0002). Every backtest
-  submission (`start_backtest`, and each child of `compare_strategies`)
-  acquires it for the full "submit → watch until finished/failed/cancelled"
-  span, then releases.
-- A job is `state="queued"` while waiting on the lock, `state="running"` once
-  acquired and OctoBot confirms the run started.
+- **Two independent process-wide `asyncio.Lock`s live on `JobStore`, one
+  per OctoBot-side one-at-a-time constraint** (ADR-0002 for the first,
+  ADR-0007 for the second — confirmed from source to be two genuinely
+  separate resources inside OctoBot, not the same constraint reused):
+  - `backtest_execution_lock`, reflecting OctoBot's one-backtest-at-a-time
+    constraint. Every backtest submission (`start_backtest`, and each child
+    of `compare_strategies`) acquires it for the full "submit → watch until
+    finished/failed/cancelled" span, then releases.
+  - `data_collection_execution_lock` (ADR-0007), reflecting OctoBot's
+    separate one-data-collection-at-a-time constraint. `start_data_collection`
+    acquires it for the same kind of "submit → watch until
+    finished/failed/cancelled" span, then releases. A `start_backtest` and a
+    `start_data_collection` call never block on each other's lock.
+- A job is `state="queued"` while waiting on its kind's lock, `state="running"`
+  once acquired and OctoBot confirms the run started.
 
 ### Background watcher (per running job)
+This describes the `backtest`/`compare_strategies` watcher against
+`/backtesting` specifically. `start_data_collection`'s watcher (ADR-0007)
+follows the identical 6-step structure and lock-release discipline against
+`/data_collector`/`data_collector_status` instead, with the payload-shape
+and progress-conversion differences documented in this doc's "Historical
+data collection" section above — it is not re-described step-by-step here
+to avoid the two watchers' descriptions drifting out of sync with each
+other as much as duplicating them would risk.
+
 1. On acquiring the lock: `POST` the appropriate start action; on 200,
    record `octobot_run_source`; on error, set `state="failed"`, release lock,
    return.
@@ -310,9 +519,15 @@ OctoBot).
    - If 0 children have completed yet: `combined_eta = current_child_eta_seconds` if available, else `None` with `"low"` confidence (do not fabricate a multi-child estimate from zero completed runs — this directly implements NFR-3's "no fabricated ETA" requirement at the aggregate level too).
 
 ## Invariants
-- INV-1: `backtest_execution_lock` is released in a `finally` block on every
-  code path through the watcher — a watcher exception can never leave
-  subsequent jobs permanently queued.
+- INV-1: **every job-execution lock** (`backtest_execution_lock`,
+  `data_collection_execution_lock` added by ADR-0007, and any future
+  job-kind-specific lock) is released in a `finally` block on every code
+  path through that lock's own watcher — a watcher exception can never
+  leave subsequent jobs waiting on that same lock permanently queued.
+  Originally scoped to `backtest_execution_lock` only; generalized when
+  ADR-0007 added the second lock, the same "generalize once a second
+  instance appears" pattern this project already applies elsewhere (e.g.
+  `_parse_content_disposition_filename`'s move to a shared helper).
 - INV-2: `eta_seconds` is `None` whenever `eta_confidence == "low"` AND
   (fewer than 2 samples exist, OR the staleness check has triggered) —
   never a numeric value with no basis, and never a stale numeric value left
@@ -362,12 +577,27 @@ blocking implementation tasks for the specific tools they affect:
 (Q4), the `convert_profile_to_live`/confirm-gating completeness (Q5), and
 `start_backtest`'s `current_bot_data` mode field values (Q6).
 
+Historical-data-collection addendum open questions (requirements doc 7–11,
+ADR-0007/ADR-0008): `list_data_files`'s `file`-field type (Q7),
+`start_data_collection`'s timestamp units (Q8), the progress-conversion
+formula's step-indexing assumption (Q9), `_ensure_backtesting_limits`'s
+exact validation text (Q10), and whether a mid-collection failure has any
+distinguishable status signal (Q11) — all blocking implementation tasks for
+the new tasklist item, not guesses to implement against.
+
 ## Hand-off
-- Traced requirements: FR-1..FR-20, NFR-1..NFR-12 (requirements doc).
+- Traced requirements: FR-1..FR-20, NFR-1..NFR-12 (requirements doc); the
+  historical-data-collection addendum additionally traces to FR-22..FR-27,
+  NFR-13..NFR-15.
 - Implementer: `developer` agent, sequenced per `docs/tasklist.md`.
 - Test coverage expectations: every ETA branch (unit, synthetic sequences),
   every confirm-gated tool (unit, with/without flag), the watcher's lock
   release on exception (unit, forced exception), the job store TTL/cap
   eviction (unit), and one end-to-end smoke test per milestone against the
   live instance where the live instance is reachable from the developer's
-  environment.
+  environment. For the addendum specifically: a standalone `/data_collector`
+  Socket.IO round-trip check (mirroring milestone 8's own first task) before
+  wiring the full watcher, a unit test for the step-progress conversion
+  formula's boundary values (0 steps, `current_step == total_steps`, a
+  clamp-triggering out-of-range input), and a broken-fixture test proving
+  `list_data_files` fails loud (mirroring `list_profiles`'s own).

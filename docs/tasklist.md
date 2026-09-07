@@ -170,3 +170,71 @@ global project standards.
     spec's Observability section; run a full smoke-test checklist against
     the live instance covering every tool at least once. This is the
     exit criterion for calling v1 done.
+
+15. **Historical data collection tools — new scope addendum (ADR-0007/ADR-0008).**
+    Not one of the original 14 milestones or the 13.5/13.6 backlog-gap
+    addenda — this is genuinely new scope, added after v1 shipped, closing
+    a gap discovered while designing it: `start_backtest(mode="data_files")`'s
+    own docstring already admits there is no tool exposing what data files
+    exist. Traces to FR-22..FR-27, NFR-13..NFR-15 (requirements doc) and the
+    "Historical data collection" section of the tool spec.
+
+    **Step 0 (do first, mirroring milestone 8's own first task):**
+    connect a `python-socketio` async client to the live instance's
+    `/data_collector` namespace and confirm `data_collector_status` round-
+    trips (client emits with no payload, server emits back
+    `{"status", "progress": {"current_step", "total_steps",
+    "current_step_percent"}}`) — before wiring the full watcher. While
+    connected, trigger one real multi-symbol/multi-timeframe collection and
+    log the raw `(current_step, total_steps, current_step_percent)`
+    sequence to resolve open question #9 (indexing) before finalizing the
+    progress-conversion formula in ADR-0007. Also resolve open questions #8
+    (timestamp units — trace `_background_collect_exchange_historical_data`
+    or test empirically) and #10 (`_ensure_backtesting_limits`'s exact
+    validation text) before or during this step.
+
+    **Then implement, in this order:**
+    1. `octobot_mcp.jobs.JobKind` widened to include `"data_collection"`;
+       add `JobStore.data_collection_execution_lock` (NFR-15) — no other
+       `JobStore` changes needed (ADR-0007's "generic across kind" proof).
+    2. Move `_extract_progress_token`/`_build_progress_notifier`/
+       `_attach_progress_notifier` from `octobot_mcp.tools.backtesting` to
+       `octobot_mcp.tools._shared` (this milestone is their second
+       consumer, mirroring the `_parse_content_disposition_filename`
+       precedent from milestone 13).
+    3. New error classes in `octobot_mcp.errors`:
+       `DataCollectionStartFailedError`, `DataFileScrapeContractBrokenError`,
+       `DataFileDeleteRejectedError`, `DataFileImportFailedError` — same
+       one-class-per-domain-specific-failure convention as every prior
+       milestone. Defined **before** the module below that raises them.
+    4. New module `octobot_mcp.tools.data_collection`: the
+       `/data_collector` Socket.IO watcher (mirroring
+       `_BacktestingStatusChannel`/`_watch_until_done`/
+       `_run_backtest_watcher`'s structure, INV-1 lock-release-in-`finally`
+       preserved), `start_data_collection`, `delete_data_file` (**gated,
+       `confirm=true` required** via the shared `require_confirmation`
+       helper — reversed from this addendum's original not-gated draft; see
+       requirements doc FR-25/tool spec for the reasoning), `import_data_file`,
+       `get_available_symbols_for_collection`,
+       `get_available_timeframes_for_collection`, and `list_data_files`
+       (Tier B — BeautifulSoup scrape of `GET /data_collector`'s
+       `tr.selectable_datafile` rows, fail-loud via
+       `DataFileScrapeContractBrokenError`, mirroring `list_profiles`'s
+       INV-5-style discipline; resolve open question #7, the exact `file`
+       value type, against the live instance first).
+    5. One new branch in `octobot_mcp.tools.backtesting.get_job_result`:
+       `elif job.kind == "data_collection": return job.result`.
+    6. Register the new tools (`register_all`), update `README.md`'s
+       "Available tools" list (noting `delete_data_file` as confirm-gated
+       alongside the existing gated-tools list).
+
+    **Demo:** agent lists available symbols/timeframes for an exchange,
+    starts a real data collection job, polls `get_job_status` and watches
+    `progress_percent`/`eta_seconds` advance to completion, calls
+    `get_job_result`, then calls `list_data_files` and finds the new file,
+    then calls `start_backtest(mode="data_files", files=[<that file>])`
+    against it — demonstrating the end-to-end "collect then backtest" flow
+    this addendum exists to enable. Also demo: `cancel_job` on a
+    still-running collection; `delete_data_file` refusing without
+    `confirm=true` and then removing the file with `confirm=true`;
+    `import_data_file` uploading a file obtained out of band.
