@@ -26,12 +26,16 @@ and reporting back a normal, structured refusal a calling agent can read
 and act on. A gated tool therefore calls `require_confirmation` and
 `return`s its result directly (never `raise`s it, and it is never passed
 through `with_error_handling`/`ToolError`).
+
+Milestone 12 (docs/tasklist.md item 12) adds `redact_secrets`, INV-4/NFR-6's
+"single redaction helper" -- see its own docstring below. Its one consumer
+is `octobot_mcp.tools.exchanges.update_exchange_credentials`.
 """
 
 from __future__ import annotations
 
 import functools
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, TypeVar
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -39,6 +43,13 @@ from mcp.server.mcpserver.exceptions import ToolError
 from octobot_mcp.errors import OctoBotAPIError
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
+
+#: The fixed marker `redact_secrets` substitutes for every scrubbed literal
+#: value. Deliberately not e.g. the secret's own last-4-chars (that would be
+#: a second, ad-hoc partial-redaction scheme independent of
+#: `update_exchange_credentials`' own dedicated `api_key_last4` field) --
+#: this marker means only "a secret value was here," nothing more.
+REDACTION_MARKER = "[REDACTED]"
 
 
 def with_error_handling(func: F) -> F:
@@ -117,3 +128,57 @@ def require_confirmation(action: str, target: str, reason: str) -> dict[str, Any
             "proceed."
         ),
     }
+
+
+def redact_secrets(text: str, secrets: Iterable[str | None]) -> str:
+    """Scrub every literal occurrence of `secrets` out of `text` (INV-4/NFR-6).
+
+    The ONE shared implementation of INV-4's "single redaction helper used
+    at the boundary where OctoBot's response is read, not left to each call
+    site to remember." `update_exchange_credentials` (milestone 12,
+    `octobot_mcp.tools.exchanges`) is this helper's one consumer: it calls
+    this at the single point it reads OctoBot's own response text to build
+    an error message, passing the literal `api_key`/`api_secret`/
+    `api_password` values submitted in that same call.
+
+    This is deliberately active scrubbing of `text`, not a passive "assume
+    OctoBot never echoes a submitted credential back" assumption --
+    defense in depth is the whole point of NFR-6 (and, concretely,
+    `update_exchange_credentials` was confirmed against OctoBot source to
+    do exactly this on ITS success path: `controllers/configuration.py`'s
+    `/config` route echoes the caller's entire submitted `global_config`
+    dict back verbatim as `global_updated_config` -- which is precisely why
+    that tool never reads or forwards OctoBot's response body content at
+    all on success, only on the error path this helper guards).
+
+    Every occurrence of every non-empty value in `secrets` is replaced with
+    `REDACTION_MARKER`; falsy entries (`None` or `""`, e.g. an omitted
+    optional `api_password`) are skipped -- an empty-string `.replace` would
+    otherwise insert the marker between every character of `text`.
+
+    Caveat: this is exact-literal-match only (case-sensitive, no
+    truncation/partial-match or encoding awareness -- a URL-encoded,
+    re-cased, or partially-quoted rendering of a secret would not be
+    scrubbed). Judged acceptable for its one current consumer
+    (`update_exchange_credentials`), whose only real error text source
+    (`str(exception)` from `update_global_config`'s own `except Exception`
+    branch, confirmed against source) is not known to transform submitted
+    values that way -- but a future consumer with a different error-text
+    source should re-check this assumption before relying on it.
+
+    Args:
+        text: the raw string to scrub (e.g. OctoBot's own error response
+            text for a failed request).
+        secrets: the literal secret values submitted in this call (e.g.
+            `[api_key, api_secret, api_password]`); `None`/empty entries are
+            ignored.
+
+    Returns:
+        `text` with every occurrence of every given secret replaced by
+        `REDACTION_MARKER`.
+    """
+    redacted = text
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, REDACTION_MARKER)
+    return redacted

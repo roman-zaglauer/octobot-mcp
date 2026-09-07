@@ -119,6 +119,28 @@ Milestone 10 (docs/tasklist.md item 10, `compare_strategies`) adds one more:
   builder) rather than reusing that error type directly, so a caller can
   tell "one of my `compare_strategies` configs was invalid" apart from "my
   plain `start_backtest` call was invalid."
+
+Milestone 12 (docs/tasklist.md item 12, the remaining confirm-gated
+destructive tools) adds one more. `clear_orders_history`/
+`clear_trades_history`/`clear_portfolio_history`/`clear_transactions_history`
+have no dedicated exception class: all four map to a confirmed real JSON
+route (`api/trading.py`, `[V]`) whose only failure modes are the generic
+4xx/5xx classification `octobot_mcp.client.request_json` already handles,
+so `OctoBotClientError`/`OctoBotServerError` are the right (and only)
+exceptions these tools ever raise.
+- `ExchangeCredentialsUpdateRejectedError` -- `update_exchange_credentials`
+  failed, either because OctoBot itself rejected the write (`POST /config`'s
+  `global_config` branch, confirmed against source
+  `models/configuration.py::update_global_config`'s `(success, err_message)`
+  return value, which the route maps 1:1 to HTTP 200/500 -- unlike several
+  `profiles.py` routes, this one's status code IS trustworthy, no post-hoc
+  re-check needed) or because this tool refused locally, before ever
+  contacting OctoBot, because the given `exchange` name contains an
+  underscore (see `octobot_mcp.tools.exchanges.update_exchange_credentials`'s
+  docstring for why that specific case is refused). Every message this
+  exception carries has already been passed through
+  `octobot_mcp.tools._shared.redact_secrets` (INV-4/NFR-6) -- never the raw,
+  unscrubbed OctoBot response text.
 """
 
 from __future__ import annotations
@@ -325,4 +347,29 @@ class CompareStrategiesStartFailedError(OctoBotAPIError):
     `BacktestStartFailedError`/`TypeError`), with the offending
     `configs[<index>]` named in the message. See
     `octobot_mcp.tools.backtesting.compare_strategies`'s docstring.
+    """
+
+
+class ExchangeCredentialsUpdateRejectedError(OctoBotAPIError):
+    """`update_exchange_credentials` failed (milestone 12, ADR-0003, confirm-gated).
+
+    Raised only after the caller has already confirmed (`confirm=true`) --
+    see `octobot_mcp.tools._shared.require_confirmation` for the unconfirmed
+    path, which is a normal return, not an exception. Two distinct causes:
+    - A local refusal, before any OctoBot call is made, because `exchange`
+      contains an underscore -- see
+      `octobot_mcp.tools.exchanges.update_exchange_credentials`'s docstring
+      for the source-confirmed reason this specific case is refused.
+    - OctoBot itself rejected the write: `POST /config`'s `global_config`
+      branch (confirmed against source `models/configuration.py::
+      update_global_config`) returns a real `(success, err_message)` pair
+      the route maps 1:1 to HTTP 200/500 -- this tool trusts that status
+      code, unlike several `profiles.py` routes that needed a post-hoc
+      re-check.
+    Every message this exception carries has already been passed through
+    `octobot_mcp.tools._shared.redact_secrets` (INV-4/NFR-6): the literal
+    `api_key`/`api_secret`/`api_password` values submitted in the same call
+    are scrubbed before being included here, since OctoBot's own responses
+    for this route are confirmed (see that tool's docstring) to sometimes
+    echo submitted config values back verbatim.
     """

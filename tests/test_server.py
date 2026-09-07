@@ -37,17 +37,22 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_10_TOOL_NAMES = {
+EXPECTED_MILESTONE_12_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
     "get_pnl_history",
     "get_historical_portfolio_value",
+    "clear_orders_history",
+    "clear_trades_history",
+    "clear_portfolio_history",
+    "clear_transactions_history",
     "get_currency_list",
     "get_all_currencies",
     "get_all_symbols",
     "check_accounts_compatible",
     "get_exchange_details",
+    "update_exchange_credentials",
     "list_profiles",
     "get_profile",
     "create_profile",
@@ -78,9 +83,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_10_tools(client: Client):
+async def test_server_lists_the_milestone_12_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_10_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_12_TOOL_NAMES
 
 
 @pytest.mark.anyio
