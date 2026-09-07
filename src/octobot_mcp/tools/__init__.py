@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from octobot_mcp.tools import backtesting, exchanges, jobs, portfolio, profiles
+from octobot_mcp.tools import backtesting, exchanges, jobs, portfolio, profiles, tentacles
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import MCPServer
@@ -27,3 +27,4 @@ def register_all(mcp: "MCPServer") -> None:
     profiles.register(mcp)
     jobs.register(mcp)
     backtesting.register(mcp)
+    tentacles.register(mcp)

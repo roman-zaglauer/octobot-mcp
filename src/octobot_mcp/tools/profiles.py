@@ -128,7 +128,6 @@ Before returning anything, `_parse_profiles_selector_html` raises
 
 import base64
 import binascii
-from email.message import Message
 from typing import Any
 
 import httpx2 as httpx
@@ -151,7 +150,11 @@ from octobot_mcp.errors import (
     ProfileSelectionFailedError,
     ProfileUpdateRejectedError,
 )
-from octobot_mcp.tools._shared import require_confirmation, with_error_handling
+from octobot_mcp.tools._shared import (
+    _parse_content_disposition_filename,
+    require_confirmation,
+    with_error_handling,
+)
 
 _PROFILES_SELECTOR_PATH = "/profiles_selector"
 
@@ -172,25 +175,6 @@ _VALID_CREATE_PROFILE_MODES = (
     "import_cloud_strategy",
 )
 
-
-def _parse_content_disposition_filename(content_disposition: str) -> str | None:
-    """Extract `filename` from a `Content-Disposition` header value, or `None` if absent.
-
-    RFC 6266/2183: a header parameter is only quoted when its value isn't a
-    bare HTTP token (e.g. it contains a space) -- `attachment;
-    filename="some name.zip"` vs. `attachment; filename=some_name.zip` are
-    both valid and both real (confirmed live: OctoBot's own `flask.send_file`
-    produces the unquoted form for any profile name that happens to already
-    be a single token, e.g. its stock `daily_trading` profile). A regex
-    matching only the quoted form silently mishandles the unquoted one, so
-    this uses the stdlib's own header-parameter parser
-    (`email.message.Message.get_filename`, the same RFC 2183 parameter
-    grammar `Content-Disposition` uses) instead of hand-rolling either
-    form.
-    """
-    message = Message()
-    message["content-disposition"] = content_disposition
-    return message.get_filename()
 
 #: Confirmed source-level mapping (see module docstring): any other/absent
 #: badge text is a legitimate "neither trader enabled" state, not a broken
@@ -882,10 +866,12 @@ async def export_profile(ctx: Context, profile_id: str) -> Any:
     (confirmed live: `attachment; filename=<profile name>_<YYYYMMDD-HHMMSS>.zip`,
     quoted only when the profile name isn't already a single HTTP token --
     e.g. it contains a space -- per RFC 6266/2183; both forms confirmed
-    live, see `_parse_content_disposition_filename`) rather than
-    reconstructed locally, so it always matches exactly what OctoBot named
-    the file. Raises `OctoBotMalformedResponseError` if that header is
-    missing or unparseable -- never returns a fabricated filename.
+    live, see `octobot_mcp.tools._shared._parse_content_disposition_filename`,
+    moved there in milestone 13 so `octobot_mcp.tools.tentacles.export_logs`
+    shares this same implementation) rather than reconstructed locally, so
+    it always matches exactly what OctoBot named the file. Raises
+    `OctoBotMalformedResponseError` if that header is missing or
+    unparseable -- never returns a fabricated filename.
 
     Output: `{"profile_id": str, "filename": str, "content_base64": str}`.
     Read-only, not confirm-gated (ADR-0003). An unknown `profile_id` raises

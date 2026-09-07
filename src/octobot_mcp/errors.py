@@ -141,6 +141,25 @@ exceptions these tools ever raise.
   exception carries has already been passed through
   `octobot_mcp.tools._shared.redact_secrets` (INV-4/NFR-6) -- never the raw,
   unscrubbed OctoBot response text.
+
+Milestone 13 (docs/tasklist.md item 13, tentacle config + logs) adds one
+more:
+- `TentacleConfigUpdateRejectedError` -- `update_tentacle_config` failed.
+  Wraps OctoBot's own error text from `POST /config_tentacle` (confirmed
+  against source `Services/Interfaces/web_interface/controllers/
+  tentacles_config.py::config_tentacle()` and reproduced live against the
+  OctoBot 2.1.1 test instance): its one failure branch responds HTTP 500
+  with a plain-text body (e.g. `"Can't find <tentacle> class"`) despite a
+  `Content-Type: application/json` header that lies about the body's
+  actual encoding -- the same pattern `profiles.py`/`exchanges.py` already
+  handle via their own `_extract_error_text` helpers. `get_tentacle_config`/
+  `export_logs` have no dedicated exception classes of their own: both are
+  reads whose failures are already well served by the generic
+  `OctoBotClientError`/`OctoBotServerError` (with OctoBot's own extracted
+  error text folded into the message, the same idiom
+  `octobot_mcp.tools.profiles.export_profile` already uses) -- matching
+  this project's established convention that only *mutations* needing a
+  domain-specific outcome get their own error class.
 """
 
 from __future__ import annotations
@@ -372,4 +391,22 @@ class ExchangeCredentialsUpdateRejectedError(OctoBotAPIError):
     are scrubbed before being included here, since OctoBot's own responses
     for this route are confirmed (see that tool's docstring) to sometimes
     echo submitted config values back verbatim.
+    """
+
+
+class TentacleConfigUpdateRejectedError(OctoBotAPIError):
+    """`update_tentacle_config` failed (milestone 13).
+
+    Wraps OctoBot's own error text from `POST /config_tentacle`'s
+    `action=update` branch (confirmed against source
+    `Services/Interfaces/web_interface/controllers/tentacles_config.py::
+    config_tentacle()` and reproduced live against the OctoBot 2.1.1 test
+    instance: an unrecognized `tentacle` name returns HTTP 500 with the
+    plain-text body `"Can't find <tentacle> class"`). Not confirm-gated
+    (ADR-0003): mutates tentacle configuration, does not destroy data,
+    expose credentials, or enable live trading. See
+    `octobot_mcp.tools.tentacles.update_tentacle_config`'s docstring for the
+    full verified request/response shape and the spec correction it
+    documents (the tentacle name is a query parameter, not a JSON body
+    field).
     """

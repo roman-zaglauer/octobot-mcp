@@ -16,14 +16,21 @@ any HTTP/Socket.IO call -- they operate purely on the in-memory job store);
 milestone 8 (item 8) adds `start_backtest`/`get_job_result`, the tools that
 finally wire the job store to a real OctoBot backtest run via the
 Socket.IO progress watcher (neither confirm-gated: `start_backtest` starts
-a simulation, `get_job_result` is read-only).
+a simulation, `get_job_result` is read-only); milestone 12 (item 12) adds
+the remaining confirm-gated tools (`clear_orders_history`/
+`clear_trades_history`/`clear_portfolio_history`/`clear_transactions_history`/
+`update_exchange_credentials`); milestone 13 (item 13) adds
+`get_tentacle_config`/`update_tentacle_config`/`export_logs` (Tier A) and
+the Tier-C stubs `list_tentacles`/`get_logs` (ADR-0006 -- neither ever
+makes an HTTP call).
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
 `test_tools_portfolio.py`/`test_tools_exchanges.py`/`test_tools_profiles.py`/
-`test_tools_profiles_gated.py`/`test_tools_jobs.py`/`test_tools_backtesting.py`
-for per-tool behavior and `test_server_tools_integration.py` for an
-end-to-end call through this same `mcp` wiring.
+`test_tools_profiles_gated.py`/`test_tools_jobs.py`/`test_tools_backtesting.py`/
+`test_tools_tentacles.py` for per-tool behavior and
+`test_server_tools_integration.py` for an end-to-end call through this same
+`mcp` wiring.
 
 Since milestone 3 also wires `mcp`'s real `app_lifespan` (NFR-11) into
 this module-level `mcp` instance, connecting a `Client` to it now runs
@@ -37,7 +44,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_12_TOOL_NAMES = {
+EXPECTED_MILESTONE_13_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -67,6 +74,11 @@ EXPECTED_MILESTONE_12_TOOL_NAMES = {
     "start_backtest",
     "get_job_result",
     "compare_strategies",
+    "get_tentacle_config",
+    "update_tentacle_config",
+    "list_tentacles",
+    "get_logs",
+    "export_logs",
 }
 
 
@@ -83,9 +95,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_12_tools(client: Client):
+async def test_server_lists_the_milestone_13_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_12_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_13_TOOL_NAMES
 
 
 @pytest.mark.anyio

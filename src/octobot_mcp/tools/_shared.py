@@ -30,12 +30,20 @@ through `with_error_handling`/`ToolError`).
 Milestone 12 (docs/tasklist.md item 12) adds `redact_secrets`, INV-4/NFR-6's
 "single redaction helper" -- see its own docstring below. Its one consumer
 is `octobot_mcp.tools.exchanges.update_exchange_credentials`.
+
+Milestone 13 (docs/tasklist.md item 13) moves `_parse_content_disposition_filename`
+here from `octobot_mcp.tools.profiles` -- it was originally written for
+`export_profile` alone, but `octobot_mcp.tools.tentacles.export_logs` needs
+the exact same binary-file-download Content-Disposition parsing (both
+quoted and unquoted header forms), so this is now the one shared
+implementation both consumers call rather than a second copy.
 """
 
 from __future__ import annotations
 
 import functools
 from collections.abc import Awaitable, Callable, Iterable
+from email.message import Message
 from typing import Any, TypeVar
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -182,3 +190,28 @@ def redact_secrets(text: str, secrets: Iterable[str | None]) -> str:
         if secret:
             redacted = redacted.replace(secret, REDACTION_MARKER)
     return redacted
+
+
+def _parse_content_disposition_filename(content_disposition: str) -> str | None:
+    """Extract `filename` from a `Content-Disposition` header value, or `None` if absent.
+
+    RFC 6266/2183: a header parameter is only quoted when its value isn't a
+    bare HTTP token (e.g. it contains a space) -- `attachment;
+    filename="some name.zip"` vs. `attachment; filename=some_name.zip` are
+    both valid and both real (confirmed live: OctoBot's own `flask.send_file`
+    produces the unquoted form for any download name that happens to already
+    be a single token, e.g. `export_profile`'s stock `daily_trading` profile
+    and `export_logs`'s hardcoded `logs_export.zip`). A regex matching only
+    the quoted form silently mishandles the unquoted one, so this uses the
+    stdlib's own header-parameter parser (`email.message.Message.get_filename`,
+    the same RFC 2183 parameter grammar `Content-Disposition` uses) instead
+    of hand-rolling either form.
+
+    Milestone 5's one original consumer was `octobot_mcp.tools.profiles.
+    export_profile`; milestone 13 (docs/tasklist.md item 13) moved this here
+    so `octobot_mcp.tools.tentacles.export_logs` shares the same
+    implementation rather than duplicating it.
+    """
+    message = Message()
+    message["content-disposition"] = content_disposition
+    return message.get_filename()
