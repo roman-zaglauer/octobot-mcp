@@ -20,6 +20,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from octobot_mcp.jobs import JobStore
 from octobot_mcp.tools.backtesting import (
+    MAX_CONSECUTIVE_WATCHER_TICK_FAILURES,
     _StartSpec,
     _build_diff,
     _current_bot_data_mode_spec,
@@ -448,6 +449,14 @@ async def test_watcher_reconciles_a_queued_to_cancelled_race_during_the_in_fligh
 
 @pytest.mark.anyio
 async def test_lock_is_released_after_a_forced_exception_and_a_second_job_can_then_acquire_it():
+    """A SUSTAINED Socket.IO failure (every tick fails, not just one) still
+    eventually fails the job and releases the lock (INV-1) -- milestone 14's
+    bounded per-tick retry (`MAX_CONSECUTIVE_WATCHER_TICK_FAILURES`) absorbs
+    a lone transient hiccup instead of failing the job on the very first one
+    (see `tests/test_tools_backtesting_resilience.py` for that recovery
+    case), so this test's fake now fails MAX_CONSECUTIVE_WATCHER_TICK_FAILURES
+    times in a row -- the same "genuinely broken, not transient" scenario
+    the original test intended to force -- rather than just once."""
     store = JobStore()
     job = store.create_job("backtest")
 
@@ -455,7 +464,9 @@ async def test_lock_is_released_after_a_forced_exception_and_a_second_job_can_th
         return httpx.Response(200, json="Backtesting started")
 
     client = httpx.AsyncClient(base_url="http://octobot.example", transport=httpx.MockTransport(handler))
-    fake_sio = _FakeSocketIOClient([RuntimeError("simulated hard Socket.IO failure")])
+    fake_sio = _FakeSocketIOClient(
+        [RuntimeError("simulated hard Socket.IO failure")] * MAX_CONSECUTIVE_WATCHER_TICK_FAILURES
+    )
 
     await _run_backtest_watcher(
         client,

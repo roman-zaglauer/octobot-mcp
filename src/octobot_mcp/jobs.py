@@ -34,6 +34,21 @@ compute `eta_seconds`/`eta_confidence` and bound `samples` -- this module
 still does not talk to OctoBot/Socket.IO/HTTP itself; `octobot_mcp.eta` is
 equally free of any such I/O.
 
+Milestone 14 (docs/tasklist.md item 14, the error handling / resilience
+polish pass) adds the spec's Observability section per-job-transition log
+line -- `{job_id, kind, from_state, to_state, progress_percent}` -- emitted
+by `_log_job_transition` from every `JobStore` method that actually mutates
+a job's `state` field (`start`/`complete`/`fail`/`cancel`'s `"queued"`
+branch/`confirm_cancelled`), and ONLY when that method actually changes
+`state`: a no-op call (e.g. `cancel()` on an already-terminal job, or
+`cancel()`'s `"running"` branch, which only sets `cancel_requested` without
+touching `state` at all) logs nothing, since nothing transitioned. This
+mirrors `octobot_mcp.tools._shared.with_error_handling`'s own per-call
+logging precedent (one shared implementation at the exact point the real
+mutation happens, not scattered per-call-site logging), and is itself
+`_logger.info`-level, plain `logging` -- this module already imports
+`logging` for `track_watcher_task`'s own error-callback logging above.
+
 Milestone 11 (docs/tasklist.md item 11, `octobot_mcp.tools.backtesting`) adds
 two more opaque, purely-optional `JobRecord` fields -- `progress_token` and
 `progress_notifier` -- plus `JobStore.set_progress_notifier`, so a job created
@@ -81,6 +96,27 @@ JOB_RETENTION_CAP = 50
 
 #: States from which a job never transitions again.
 TERMINAL_STATES: frozenset[JobState] = frozenset({"completed", "failed", "cancelled"})
+
+
+def _log_job_transition(job: "JobRecord", from_state: JobState) -> None:
+    """Emit the spec's Observability section per-job-transition log line (milestone 14).
+
+    Called only by the `JobStore` mutator branches that just ACTUALLY changed
+    `job.state` (never on a no-op) -- see this module's own docstring for
+    which methods/branches those are. `from_state` is passed explicitly
+    (captured by the caller before mutating) rather than re-derived here,
+    since by the time this runs `job.state` already holds the NEW value.
+    """
+    _logger.info(
+        "job_transition %r",
+        {
+            "job_id": job.job_id,
+            "kind": job.kind,
+            "from_state": from_state,
+            "to_state": job.state,
+            "progress_percent": job.progress_percent,
+        },
+    )
 
 
 @dataclass
@@ -215,10 +251,12 @@ class JobStore:
         job = self._jobs.get(job_id)
         if job is None or job.state != "queued":
             return job
+        from_state = job.state
         job.state = "running"
         job.started_at_monotonic = time.monotonic()
         job.started_at_wall = time.time()
         job.octobot_run_source = octobot_run_source
+        _log_job_transition(job, from_state)
         return job
 
     def complete(self, job_id: str, *, result: dict) -> JobRecord | None:
@@ -226,11 +264,13 @@ class JobStore:
         job = self._jobs.get(job_id)
         if job is None or job.state != "running":
             return job
+        from_state = job.state
         job.state = "completed"
         job.progress_percent = 100.0
         job.result = result
         job.finished_at_monotonic = time.monotonic()
         job.finished_at_wall = time.time()
+        _log_job_transition(job, from_state)
         return job
 
     def fail(self, job_id: str, *, error: str) -> JobRecord | None:
@@ -238,10 +278,12 @@ class JobStore:
         job = self._jobs.get(job_id)
         if job is None or job.state in TERMINAL_STATES:
             return job
+        from_state = job.state
         job.state = "failed"
         job.errors.append(error)
         job.finished_at_monotonic = time.monotonic()
         job.finished_at_wall = time.time()
+        _log_job_transition(job, from_state)
         return job
 
     def cancel(self, job_id: str) -> JobRecord | None:
@@ -258,10 +300,15 @@ class JobStore:
         if job is None or job.state in TERMINAL_STATES:
             return job
         if job.state == "queued":
+            from_state = job.state
             job.state = "cancelled"
             job.finished_at_monotonic = time.monotonic()
             job.finished_at_wall = time.time()
+            _log_job_transition(job, from_state)
         elif job.state == "running":
+            # No `state` mutation here (only the flag below) -- per this
+            # module's own docstring, this is deliberately NOT logged as a
+            # transition: nothing has actually changed yet.
             job.cancel_requested = True
         return job
 
@@ -281,9 +328,11 @@ class JobStore:
         job = self._jobs.get(job_id)
         if job is None or job.state != "running":
             return job
+        from_state = job.state
         job.state = "cancelled"
         job.finished_at_monotonic = time.monotonic()
         job.finished_at_wall = time.time()
+        _log_job_transition(job, from_state)
         return job
 
     def record_watcher_tick(

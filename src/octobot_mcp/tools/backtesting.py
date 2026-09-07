@@ -216,6 +216,31 @@ SOCKETIO_CONNECT_TIMEOUT_SECONDS = 5.0
 #: faster than this in practice.
 SOCKETIO_STATUS_TIMEOUT_SECONDS = 5.0
 
+#: Milestone 14 (docs/tasklist.md item 14) bounded watcher-loop resilience:
+#: the spec's Observability section calls for "a log line per watcher loop
+#: error (not just terminal failure): so a transient Socket.IO hiccup is
+#: visible even if the job ultimately recovers." Before this milestone, ANY
+#: exception from one `channel.request_status()` tick (a single dropped
+#: packet, a slow GC pause, one missed `SOCKETIO_STATUS_TIMEOUT_SECONDS`
+#: round trip, ...) propagated straight to `_run_backtest_watcher`'s
+#: catch-all and failed the WHOLE job immediately -- too brittle for a
+#: multi-minute backtest. `_watch_until_done` now catches a per-tick
+#: failure INSIDE the loop, logs it (below), and retries on the next tick
+#: instead -- but only up to this many CONSECUTIVE failures; a single
+#: successful tick resets the counter to 0, so this bounds a genuinely dead
+#: connection/job without weakening INV-1 (a sustained failure -- every
+#: retry within the bound also failing -- still eventually fails the job,
+#: exactly as it always has).
+#:
+#: Chosen as 3: at `SOCKETIO_STATUS_TIMEOUT_SECONDS` (5s) per failed
+#: attempt, this bounds a sustained outage to ~15s of wall-clock time
+#: (comparable to `client.py`'s own 10s REST timeout window, NFR-5) before
+#: genuinely failing the job -- long enough to absorb 1-2 truly transient
+#: hiccups that recover on the very next tick, short enough that a job
+#: never holds `backtest_execution_lock` indefinitely against a connection
+#: that will never recover.
+MAX_CONSECUTIVE_WATCHER_TICK_FAILURES = 3
+
 _BACKTESTING_PATH = "/backtesting"
 _BACKTESTING_NAMESPACE = "/backtesting"
 
@@ -836,6 +861,18 @@ async def _watch_until_done(
     never propagated: a notification-hook bug must never fail the job or
     this watcher loop, the exact same failure-isolation spirit as this
     function's own stop-confirmation error handling above.
+
+    **Milestone 14 bounded resilience** (see
+    `MAX_CONSECUTIVE_WATCHER_TICK_FAILURES`'s own docstring for the exact
+    bound and rationale): a `channel.request_status()` failure is caught
+    here, logged, and retried on the next tick rather than immediately
+    propagating -- up to that many CONSECUTIVE failures, after which the
+    latest exception is re-raised as before (reaching
+    `_run_backtest_watcher`'s catch-all, which fails the job -- INV-1's
+    guarantee that a sustained failure still eventually fails the job is
+    unchanged). A single successful tick resets the counter, so 1-2
+    transient hiccups never cost the job anything beyond the log line
+    itself.
     """
     sio = socketio_client_factory()
     await sio.connect(
@@ -844,6 +881,7 @@ async def _watch_until_done(
         wait_timeout=SOCKETIO_CONNECT_TIMEOUT_SECONDS,
     )
     channel = _BacktestingStatusChannel(sio)
+    consecutive_tick_failures = 0
     try:
         start_monotonic = time.monotonic()
         while True:
@@ -862,7 +900,24 @@ async def _watch_until_done(
                     store.append_error(job_id, f"Failed to confirm stop with OctoBot: {exc}")
                 store.confirm_cancelled(job_id)
                 return
-            payload = await channel.request_status()
+            try:
+                payload = await channel.request_status()
+            except Exception as exc:  # noqa: BLE001 -- bounded retry: see this function's own docstring.
+                consecutive_tick_failures += 1
+                _logger.warning(
+                    "Watcher tick failed for job %s (%d/%d consecutive failure(s)): %r",
+                    job_id,
+                    consecutive_tick_failures,
+                    MAX_CONSECUTIVE_WATCHER_TICK_FAILURES,
+                    exc,
+                )
+                if consecutive_tick_failures >= MAX_CONSECUTIVE_WATCHER_TICK_FAILURES:
+                    # Sustained failure, not a transient hiccup -- give up
+                    # and let the outer catch-all fail the job (INV-1).
+                    raise
+                await asyncio.sleep(interval_seconds)
+                continue
+            consecutive_tick_failures = 0
             elapsed_seconds = time.monotonic() - start_monotonic
             updated = store.record_watcher_tick(
                 job_id,

@@ -37,11 +37,39 @@ here from `octobot_mcp.tools.profiles` -- it was originally written for
 the exact same binary-file-download Content-Disposition parsing (both
 quoted and unquoted header forms), so this is now the one shared
 implementation both consumers call rather than a second copy.
+
+Milestone 14 (docs/tasklist.md item 14, the error handling / resilience
+polish pass) extends `with_error_handling` itself with the spec's
+Observability section's per-call structured log line: `{tool_name, args
+(redacted per INV-4), duration_ms, outcome, error_class?}`, emitted exactly
+once per tool invocation regardless of outcome (success, a classified
+`OctoBotAPIError`, an unconfirmed gated-tool refusal, or an unanticipated
+crash). This is the ONE place every registered tool's call already passes
+through (this module's own established DRY precedent -- see
+`require_confirmation`/`redact_secrets` above), so this is where the
+logging lives rather than a second cross-cutting wrapper or scattered
+per-tool `logger.info(...)` calls. `_redact_logged_args` is INV-4/NFR-6's
+"redact by parameter name, generically" helper this milestone's own
+instructions call for -- deliberately a *different* mechanism than
+`redact_secrets` above (which scrubs literal string occurrences out of
+unstructured text for `update_exchange_credentials`'s one error-message
+call site): this one redacts a named parameter's entire value, before it is
+ever formatted into a log line, for ANY tool whose signature happens to
+carry a parameter named `api_key`/`api_secret`/`api_password` (case-
+insensitive), not just that one tool. Logging is best-effort throughout
+(mirrors this project's other "must never fail the actual operation"
+patterns, e.g. `octobot_mcp.tools.backtesting._build_progress_notifier`'s
+notification sending): any exception raised while building or emitting the
+log line is caught and swallowed (at DEBUG) rather than ever propagating
+out of a tool call.
 """
 
 from __future__ import annotations
 
 import functools
+import inspect
+import logging
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from email.message import Message
 from typing import Any, TypeVar
@@ -50,7 +78,27 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from octobot_mcp.errors import OctoBotAPIError
 
+_logger = logging.getLogger(__name__)
+
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
+
+#: INV-4/NFR-6's generic "redact by parameter name" denylist (milestone 14).
+#: Deliberately a plain set of parameter NAMES, not tool names -- generic by
+#: construction: any current or future tool whose signature carries a
+#: parameter matching one of these (case-insensitively) has that argument's
+#: value redacted from the structured per-call log line, regardless of
+#: which tool it belongs to. `update_exchange_credentials` is this
+#: denylist's only current match (its `api_key`/`api_secret`/`api_password`
+#: parameters), but nothing here hardcodes that tool's name.
+_SENSITIVE_PARAM_NAMES = frozenset({"api_key", "api_secret", "api_password"})
+
+#: Parameter names never worth including in the logged `args` payload at
+#: all (as opposed to redacted-in-place): `ctx` is the injected MCP
+#: `Context`/`AppContext` object (not something the calling agent passed,
+#: and not JSON/repr-safe in general -- it holds a live `httpx2.AsyncClient`
+#: and, for backtest jobs, an MCP `ServerSession`), so it is dropped
+#: entirely rather than redacted.
+_NON_LOGGED_PARAM_NAMES = frozenset({"ctx"})
 
 #: The fixed marker `redact_secrets` substitutes for every scrubbed literal
 #: value. Deliberately not e.g. the secret's own last-4-chars (that would be
@@ -58,6 +106,83 @@ F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 #: `update_exchange_credentials`' own dedicated `api_key_last4` field) --
 #: this marker means only "a secret value was here," nothing more.
 REDACTION_MARKER = "[REDACTED]"
+
+
+def _redact_logged_args(func: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Build the redacted `args` mapping for one tool call's log line (INV-4/NFR-6, milestone 14).
+
+    Binds the actual call's `args`/`kwargs` against `func`'s own (pre-decoration)
+    signature -- via `inspect.signature`, which follows `functools.wraps`'
+    `__wrapped__` back to the original function regardless of how this
+    wrapper itself was called -- so this works identically whether the MCP
+    SDK invokes the tool the way it always does in production
+    (`fn(**all_kwargs)`, confirmed against `FuncMetadata.call_fn`) or a unit
+    test calls it positionally (`get_job_result(ctx, job_id)`, the
+    convention throughout this project's own test suite). `ctx` is dropped
+    entirely (`_NON_LOGGED_PARAM_NAMES`) rather than redacted -- it is
+    server-injected, not caller-supplied, and not something a log line
+    should ever try to stringify. Every remaining parameter whose NAME
+    (case-insensitively) is in `_SENSITIVE_PARAM_NAMES` has its VALUE
+    replaced with `REDACTION_MARKER`, generically, regardless of which tool
+    owns that parameter -- the mechanism this milestone's own instructions
+    call for, as opposed to `redact_secrets`'s literal-text scrubbing above.
+
+    Never raises: an unresolvable bind (e.g. a call shape this function
+    didn't anticipate) falls back to `{}` rather than ever surfacing a
+    logging-internal error to the caller of `with_error_handling`'s wrapper.
+    """
+    try:
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+    except TypeError:
+        return {}
+    return {
+        name: (REDACTION_MARKER if name.lower() in _SENSITIVE_PARAM_NAMES else value)
+        for name, value in bound.arguments.items()
+        if name not in _NON_LOGGED_PARAM_NAMES
+    }
+
+
+def _log_tool_call(
+    func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    duration_ms: float,
+    outcome: str,
+    error_class: str | None,
+) -> None:
+    """Emit the spec's Observability section per-call structured log line (milestone 14).
+
+    `{tool_name, args (redacted per INV-4), duration_ms, outcome:
+    "ok"|"error", error_class?}` -- `error_class` is only included at all
+    when `outcome == "error"` (the spec's own `?` on that field), never a
+    literal `None` on a successful call. This single log line is also
+    exactly what the spec's Security & privacy section calls "auditable
+    action" logging for gated (confirm-required) tools and for
+    `update_exchange_credentials` specifically: `tool_name` identifies which
+    action ran, and `args` (redacted) carries e.g. `confirm`/the target
+    resource, on every outcome (refusal, success, or failure) -- see this
+    module's own docstring for why no second, separate logging path exists.
+
+    Best-effort per this milestone's own explicit instruction (mirrors
+    `octobot_mcp.tools.backtesting._build_progress_notifier`'s identical
+    "never let sending/logging break the real operation" pattern): any
+    exception raised while redacting/formatting this line is caught and
+    logged at DEBUG instead, never propagated into the calling tool's
+    result.
+    """
+    try:
+        payload: dict[str, Any] = {
+            "tool_name": func.__name__,
+            "args": _redact_logged_args(func, args, kwargs),
+            "duration_ms": round(duration_ms, 1),
+            "outcome": outcome,
+        }
+        if error_class is not None:
+            payload["error_class"] = error_class
+        _logger.info("tool_call %r", payload)
+    except Exception as exc:  # noqa: BLE001 -- best-effort: logging must never fail the tool call.
+        _logger.debug("Failed to log tool call for %r (best-effort, ignored): %r", func, exc)
 
 
 def with_error_handling(func: F) -> F:
@@ -79,14 +204,42 @@ def with_error_handling(func: F) -> F:
     `__annotations__` into strings that the SDK re-evaluates against
     *this* module's globals (via `__wrapped__`/`typing.get_type_hints`),
     where `Context` isn't imported.
+
+    Milestone 14 (docs/tasklist.md item 14) additionally times every call
+    and emits the spec's Observability section per-call structured log line
+    (`_log_tool_call`) exactly once, on every exit path -- success, a
+    classified `OctoBotAPIError`, or any other exception -- via a `finally`
+    block, so the log line and the original control flow (which exception,
+    if any, propagates to the caller) are entirely independent: logging can
+    never change what the calling agent sees, and a logging failure can
+    never suppress or replace it either (`_log_tool_call` is itself
+    best-effort, see its own docstring).
     """
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        start = time.monotonic()
+        outcome = "ok"
+        error_class: str | None = None
         try:
             return await func(*args, **kwargs)
         except OctoBotAPIError as exc:
+            outcome = "error"
+            error_class = type(exc).__name__
             raise ToolError(f"{type(exc).__name__}: {exc}") from exc
+        except Exception as exc:
+            outcome = "error"
+            error_class = type(exc).__name__
+            raise
+        finally:
+            _log_tool_call(
+                func,
+                args,
+                kwargs,
+                duration_ms=(time.monotonic() - start) * 1000,
+                outcome=outcome,
+                error_class=error_class,
+            )
 
     return wrapper  # type: ignore[return-value]
 
