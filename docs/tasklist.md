@@ -146,6 +146,23 @@ global project standards.
     config for the current profile and sees the change reflected in the
     echoed output.
 
+13.6. **`cancel_order`/`close_position`/`refresh_portfolio` — closing a second backlog gap.**
+    Same pattern as 13.5: all three are specced in the spec's "Portfolio &
+    trading" table with verified routes (`cancel_order(order_id)` →
+    `POST /api/orders`; `close_position(position_id)` → `POST
+    /api/positions`; `refresh_portfolio()` → `POST /api/refresh_portfolio`)
+    but were never assigned to a tasklist item, so none were implemented.
+    User was asked and explicitly chose to implement all three now.
+    User was also asked about the spec's own flagged judgment call —
+    `cancel_order`/`close_position` are marked "not confirm-gated" with a
+    footnote saying this is "revisitable with the user" since they're
+    irreversible in effect (and can act on real money for a LIVE profile)
+    even though they're routine trading activity — and explicitly chose to
+    keep them **ungated**, per ADR-0003's original reasoning. Demo: agent
+    cancels an order/closes a position/refreshes the portfolio and sees
+    the change reflected in a follow-up `get_orders`/`get_positions`/
+    portfolio read.
+
 14. **Error handling / resilience polish pass.**
     Sweep every tool for NFR-4/NFR-5 compliance (timeout present,
     error classified, no raw stack traces reaching the MCP client);

@@ -175,6 +175,44 @@ backlog gap) adds one more:
   the full derivation. Not confirm-gated (ADR-0003): mutates strategy/
   tentacle activation config, does not destroy data, expose credentials, or
   enable live trading.
+
+Milestone 13.6 (docs/tasklist.md item 13.6, closing the `cancel_order`/
+`close_position`/`refresh_portfolio` backlog gap) adds three more. All three
+map to real routes in the same `api/trading.py` this module's other errors
+already document, confirmed against source
+(`packages/tentacles/Services/Interfaces/web_interface/api/trading.py` and
+`packages/services/octobot_services/interfaces/util/{order,position,portfolio}.py`,
+`Drakkar-Software/OctoBot`), and all three share one trait that makes a
+dedicated `_extract_error_text` worthwhile: OctoBot's own failure body for
+each is built via `util.get_rest_reply(<plain string>, 500)` -- a real,
+trustworthy HTTP 500, but `get_rest_reply` sends that string as a raw,
+unquoted response body while still forcing a `Content-Type:
+application/json` header, so `response.json()` fails and the message must be
+read from `response.text` instead -- the same lying-content-type pattern
+`tentacles.py`/`exchanges.py`/`trading_config.py` already document. None are
+confirm-gated (ADR-0003): the user was explicitly asked about the spec's own
+footnote flagging `cancel_order`/`close_position` as "revisitable" given
+their irreversible effect, and chose to keep both ungated, per ADR-0003's
+original reasoning that these are routine, expected trading-bot actions.
+- `OrderCancelRejectedError` -- `cancel_order` failed. OctoBot's failure text
+  is always the literal `"Impossible to cancel order: order not found."`
+  (confirmed against source: `api/trading.py`'s `cancel_order` action
+  branches on `interfaces_util.cancel_orders([order_id])`'s truthiness,
+  which is `0` whenever no connected exchange's `cancel_order_with_id` call
+  actually removed that order -- including when every exchange manager
+  tried raised `OrderCancelError`/`UnexpectedExchangeSideOrderStateError`
+  internally, which OctoBot itself silently swallows rather than
+  propagating).
+- `PositionCloseRejectedError` -- `close_position` failed. OctoBot's failure
+  text is always the literal `"Impossible to close position: position
+  already closed."` (confirmed against source: the same truthiness pattern,
+  via `interfaces_util.close_positions([{"symbol": ..., "side": ...}])`).
+- `PortfolioRefreshFailedError` -- `refresh_portfolio` failed. OctoBot's
+  failure text is always the literal `"No portfolio to refresh"` (confirmed
+  against source: `async_trigger_portfolios_refresh` raises a `RuntimeError`
+  whenever it finds zero enabled *real* (non-simulated) traders across every
+  connected exchange -- an entirely expected outcome on any OctoBot instance
+  running only simulated trading, not a bug).
 """
 
 from __future__ import annotations
@@ -442,4 +480,51 @@ class TradingConfigUpdateRejectedError(OctoBotAPIError):
     message, because the route's `err_message` variable is only ever
     populated by its `global_config`/`removed_elements` branches, which this
     tool never triggers.
+    """
+
+
+class OrderCancelRejectedError(OctoBotAPIError):
+    """`cancel_order` failed (milestone 13.6). Not confirm-gated (ADR-0003).
+
+    Wraps OctoBot's own error text from `POST /api/orders?action=cancel_order`
+    (confirmed against source `Services/Interfaces/web_interface/
+    api/trading.py::orders()`): a real, trustworthy HTTP 500 whose body is
+    always the literal plain-text string `"Impossible to cancel order: order
+    not found."`, despite a `Content-Type: application/json` header that
+    lies about the body's actual encoding. See
+    `octobot_mcp.tools.portfolio.cancel_order`'s docstring for the full
+    verified request/response shape.
+    """
+
+
+class PositionCloseRejectedError(OctoBotAPIError):
+    """`close_position` failed (milestone 13.6). Not confirm-gated (ADR-0003).
+
+    Wraps OctoBot's own error text from
+    `POST /api/positions?action=close_position` (confirmed against source
+    `Services/Interfaces/web_interface/api/trading.py::positions()`): a real,
+    trustworthy HTTP 500 whose body is always the literal plain-text string
+    `"Impossible to close position: position already closed."`, despite a
+    `Content-Type: application/json` header that lies about the body's
+    actual encoding. See `octobot_mcp.tools.portfolio.close_position`'s
+    docstring for the full verified request/response shape, including the
+    genuine spec correction it documents: OctoBot positions have no `id`
+    concept at all, so this tool's parameters are `symbol`/`side`, not the
+    spec's `position_id`.
+    """
+
+
+class PortfolioRefreshFailedError(OctoBotAPIError):
+    """`refresh_portfolio` failed (milestone 13.6). Not confirm-gated (ADR-0003).
+
+    Wraps OctoBot's own error text from `POST /api/refresh_portfolio`
+    (confirmed against source `Services/Interfaces/web_interface/
+    api/trading.py::refresh_portfolio()`): a real, trustworthy HTTP 500 whose
+    body is always the literal plain-text string `"No portfolio to
+    refresh"`, despite a `Content-Type: application/json` header that lies
+    about the body's actual encoding. Raised whenever OctoBot finds zero
+    enabled *real* (non-simulated) traders across every connected exchange
+    (confirmed against source `octobot_services.interfaces.util.portfolio::
+    async_trigger_portfolios_refresh`) -- an entirely expected outcome on any
+    instance running only simulated trading, not a bug.
     """
