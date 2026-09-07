@@ -54,7 +54,8 @@ reads; `get_exchange_details` returns only ONE exchange's details, never a \
 full list; `update_exchange_credentials` writes real API credentials and is \
 confirm-gated.
 - Tentacle & trading config: `get_tentacle_config`/`update_tentacle_config`/ \
-`update_trading_config` read/write configuration; `export_logs` exports a \
+`update_trading_config`/`update_evaluator_config` read/write configuration; \
+`export_logs` exports a \
 real log archive. `list_tentacles`/`get_logs` are honest stubs -- OctoBot \
 has no JSON API for either -- so they always return \
 `{"available": false, "reason": ..., "alternative": ...}` naming a real \
@@ -137,6 +138,13 @@ file actually appeared before relying on it.
 `close_position` above): treated as closer to the `clear_*_history` tools, \
 since re-collecting an erroneously deleted file can take minutes to hours, \
 not a quick redo.
+- `update_evaluator_config`'s `deactivate_others=True` only ever \
+force-disables OTHER EVALUATORS (technical-analysis/social/real-time/ \
+scripted) not named in `patch` -- it never touches trading modes or \
+strategies, even though they share the same underlying activation-config \
+mechanism. Leave it at its default `False` (purely additive) unless you \
+specifically want `patch` to become the exhaustive enabled-evaluator set \
+for this profile.
 
 ## Safety
 

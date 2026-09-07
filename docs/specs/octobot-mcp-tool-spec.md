@@ -179,6 +179,7 @@ listed under the requirements doc's "Out of scope" section.
 | Tool | R/W | Confirm | Maps to |
 |---|---|---|---|
 | `update_trading_config(patch)` | W | no | `POST /config` (`TRADING_CONFIG_KEY` branch) [V] |
+| `update_evaluator_config(patch, deactivate_others?)` | W | no | `POST /config` (`EVALUATOR_CONFIG_KEY` branch) [V] |
 
 #### `update_trading_config(patch)`
 - Input: `{"patch": object}` — the trading-mode tentacle-activation config
@@ -191,9 +192,75 @@ listed under the requirements doc's "Out of scope" section.
 - Output: `{"trading_updated_config": <passthrough of OctoBot's own echoed
   value for this key>}` [V: matches the route's own response shape].
 - Errors: `CONFIG_UPDATE_FAILED` with OctoBot's `err_message` string
-  [V: the route's failure branch returns HTTP 500 with this message].
+  [V: the route's failure branch returns HTTP 500 with this message]. Note:
+  `update_trading_config`'s own implementation found this claim is never
+  actually true for that tool's request shape (OctoBot's `err_message` stays
+  an untouched empty string for the `trading_config`/`tentacle_config`/
+  `evaluator_config` branches — only the `global_config`/`removed_elements`
+  branches ever populate it). The same is expected to hold here; confirm
+  against source/live before asserting it as fact in this tool's own
+  docstring, per this project's own "verify what you actually implement"
+  discipline (don't just copy the parent tool's finding without checking).
 - Not confirm-gated (ADR-0003): mutates strategy/tentacle activation config;
   does not destroy data, expose credentials, or enable live trading.
+
+#### `update_evaluator_config(patch, deactivate_others=False)`
+- **Addendum, added after v1 shipped** (closing a gap surfaced while
+  answering a user question about evaluator CRUD — not one of the original
+  14 milestones or the 13.5/13.6/15 addenda). Reuses `update_trading_config`'s
+  own already-shipped, already-judge-verified route/pattern almost exactly:
+  same `POST /config` route, same underlying `models.
+  update_tentacles_activation_config(...)` function (confirmed in
+  `update_trading_config`'s own docstring/verification), different top-level
+  request-body key.
+- Input: `{"patch": object, "deactivate_others"?: bool}` — `patch` is the
+  evaluator-activation config payload (a flat map of evaluator class name →
+  enabled boolean, e.g. `{"RSIMomentumEvaluator": true, "BBMomentumEvaluator":
+  false}`; confirmed against the live instance's `/advanced/evaluator_config`
+  page's rendered form: each evaluator's toggle carries literal
+  `config-type="evaluator_config" config-key=<EvaluatorClassName>` attributes,
+  the same `_save_config()` JS mechanism already confirmed for
+  `update_trading_config`/`update_exchange_credentials`, so
+  `{"evaluator_config": patch}` is the request body sent under `POST
+  /config`). Submitted under OctoBot's `EVALUATOR_CONFIG_KEY` request-body
+  key — **[UNVERIFIED] exact literal string value**: confirmed by name in
+  `update_trading_config`'s own source read (`constants.EVALUATOR_CONFIG_KEY`
+  exists and is read by the same route), but its literal string value (almost
+  certainly `"evaluator_config"`, matching the rendered form's `config-type`
+  attribute and this project's established `snake_case`-matches-attribute
+  convention for `TRADING_CONFIG_KEY`/`GLOBAL_CONFIG_KEY`) was not read
+  directly from `constants.py` this session — **developer verification task:
+  confirm the literal constant value before finalizing**, don't assume it
+  matches the rendered attribute name by convention alone.
+- `deactivate_others`: **[UNVERIFIED] exact semantics** — `update_trading_config`'s
+  own docstring notes the `EVALUATOR_CONFIG_KEY` branch calls
+  `update_tentacles_activation_config` "with an extra `deactivate_others`
+  argument neither other branch passes," confirming the PARAMETER exists,
+  but this session did not read `update_tentacles_activation_config`'s own
+  body to confirm what `deactivate_others=True` actually does (plausibly:
+  disable every evaluator not named in `patch`, vs. leaving unnamed
+  evaluators at their current state when `False` — but this is an inference
+  from the name, not a confirmed reading). **Developer verification task
+  (blocking before finalizing the tool's own documented behavior)**: read
+  `models/configuration.py::update_tentacles_activation_config`'s body to
+  confirm this before describing it as fact in the tool's docstring; default
+  `deactivate_others` to `False` (the conservative, narrower-blast-radius
+  option) regardless of what's found.
+- Output: `{"evaluator_updated_config": <passthrough of OctoBot's own echoed
+  value for this key>}` — by direct analogy to `update_trading_config`'s own
+  confirmed `{"trading_updated_config": ...}` shape (same response envelope,
+  different key extracted) [V: envelope shape already confirmed in
+  `update_trading_config`'s own verification — this tool extracts a
+  different one of its keys].
+- Errors: same `CONFIG_UPDATE_FAILED`-style pattern as `update_trading_config`
+  — expect the same "OctoBot's `err_message` stays an untouched empty
+  string" finding to hold (the `evaluator_config` branch is explicitly named
+  among the branches that never touch `err_message`, per
+  `update_trading_config`'s own verification), but confirm this
+  independently rather than assuming it transfers unchanged.
+- Not confirm-gated (ADR-0003): same rationale as `update_trading_config` —
+  mutates which evaluators are active, does not destroy data, expose
+  credentials, or enable live trading.
 
 ---
 

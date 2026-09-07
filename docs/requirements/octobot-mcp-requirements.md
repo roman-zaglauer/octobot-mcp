@@ -73,6 +73,7 @@ tentacles/logs where a real endpoint exists.
 | FR-25 | The server SHALL provide a tool to delete a historical data file by the identifier `list_data_files` returns, gated by `confirm=true` (ADR-0003). | SHOULD | Given a valid `file` identifier and `confirm` omitted/false, when `delete_data_file` is called, then no deletion occurs and a refusal explaining the required flag is returned. Given `confirm=true`, then the file is deleted. (User-confirmed decision, reversing this addendum's original not-gated draft call: an erroneous delete means re-running a collection that can take minutes to hours, unlike the instantly-correctable `cancel_order`/`close_position`, placing this closer to `clear_*_history`'s risk profile per ADR-0003's actual purpose.) |
 | FR-26 | The server SHALL provide a tool to upload an existing OctoBot-format historical data file to the instance without collecting it via an exchange. | SHOULD | Given a valid file payload, when `import_data_file` is called, then the file is saved on the OctoBot instance and the tool returns a confirmation/message; not confirm-gated (creates new state, does not destroy data). |
 | FR-27 | The server SHALL provide read tools for the exchange-scoped symbol list and available timeframe list a data collection run may target. | SHOULD | Given a valid `exchange`, `get_available_symbols_for_collection`/`get_available_timeframes_for_collection` each return the same list OctoBot's own `/data_collector` `symbol_list`/`available_timeframes_list` JSON actions return, with no scraping involved. This requirement's symbols half MAY be satisfied by reusing the existing `get_all_symbols` tool instead of adding a new one, if a developer confirms it returns equivalent data for the same exchange (see tool spec's developer note); the timeframes half has no existing equivalent and MUST be a new tool regardless. |
+| FR-28 | The server SHALL provide a tool to update evaluator activation configuration for the current profile, matching the "trading config" domain's existing `update_trading_config` tool's own pattern (same `POST /config` route, same underlying model function, a different top-level request-body key). | SHOULD | Given a valid `patch` (a map of evaluator class name → enabled boolean), when `update_evaluator_config` is called, then OctoBot's stored evaluator-activation config reflects the patch (via `POST /config`'s `EVALUATOR_CONFIG_KEY` branch) and the tool returns the updated fields; not confirm-gated (mutates which evaluators are active, does not destroy data or expose credentials), by the same ADR-0003 reasoning already applied to `update_trading_config`. |
 
 ## Non-functional requirements (ASRs)
 
@@ -203,6 +204,28 @@ The following are new for the historical-data-collection addendum
     accepted fallback (rely on generic ETA staleness detection, NFR-3) if
     this remains unconfirmed; a developer who does confirm a distinguishable
     failure signal should wire it directly into `store.fail(...)` instead.
+
+The following are new for the `update_evaluator_config` addendum (FR-28),
+continuing the same numbering:
+
+12. **Exact literal string value of `EVALUATOR_CONFIG_KEY`** — the
+    `update_trading_config` implementation confirms this constant exists and
+    names a third branch of `POST /config`'s dispatch (alongside
+    `TRADING_CONFIG_KEY`/`global_config`), but the constant's own literal
+    value was not read this session. Developer must confirm it (grep the same
+    module `TRADING_CONFIG_KEY`'s value came from) before writing
+    `update_evaluator_config`'s request body — do not guess a string like
+    `"evaluator_config"` without checking.
+13. **Exact semantics of `deactivate_others`** — `update_trading_config`'s
+    docstring notes the `EVALUATOR_CONFIG_KEY` branch calls
+    `models.update_tentacles_activation_config()` "with an extra
+    `deactivate_others` argument neither other branch passes," but the
+    argument's effect (e.g. whether omitted/unlisted evaluators in `patch`
+    are force-disabled, and whether it defaults `true` or `false` at the
+    OctoBot layer when this server doesn't pass it) was not traced into
+    `update_tentacles_activation_config`'s own body this session. Developer
+    must confirm before finalizing `update_evaluator_config`'s
+    `deactivate_others` parameter's default and documented behavior.
 
 ## Traceability
 Source material: OctoBot GitHub (Drakkar-Software/OctoBot, `master` branch,

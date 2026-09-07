@@ -260,6 +260,21 @@ ordering; see that module's docstring):
   not by parsing a response message (the spec's assumption of a readable
   OctoBot success/failure message for this route did not hold up against
   the live instance).
+
+Task 16 (docs/tasklist.md item 16, the `update_evaluator_config` addendum,
+FR-28) adds one more:
+- `EvaluatorConfigUpdateRejectedError` -- `update_evaluator_config` failed.
+  Same `POST /config` route and `err_message`-stays-empty finding as
+  `TradingConfigUpdateRejectedError` above (confirmed against source this
+  session: the `evaluator_config` branch of `Services/Interfaces/
+  web_interface/controllers/configuration.py::config()` only ever touches
+  the `success` boolean, never `err_message`, exactly like the
+  `trading_config`/`tentacle_config` branches). A dedicated class rather
+  than reusing `TradingConfigUpdateRejectedError` directly, matching this
+  project's established one-class-per-write-tool convention, so a caller can
+  tell which tool's write was rejected. Not confirm-gated (ADR-0003):
+  mutates which evaluators are active, does not destroy data, expose
+  credentials, or enable live trading.
 """
 
 from __future__ import annotations
@@ -642,4 +657,21 @@ class DataFileImportFailedError(OctoBotAPIError):
     after the upload. See
     `octobot_mcp.tools.data_collection.import_data_file`'s docstring for the
     full detail.
+    """
+
+
+class EvaluatorConfigUpdateRejectedError(OctoBotAPIError):
+    """`update_evaluator_config` failed (task 16, `docs/tasklist.md` item 16, FR-28).
+
+    Wraps OctoBot's own error text from `POST /config`'s `evaluator_config`
+    branch (confirmed against source `Services/Interfaces/web_interface/
+    controllers/configuration.py::config()`): like the `trading_config`
+    branch `TradingConfigUpdateRejectedError` documents, this branch only
+    ever touches the route's `success` boolean, never its `err_message`
+    local variable -- so the extracted error text is always an empty string
+    in practice, never a substantive message. Not confirm-gated (ADR-0003):
+    mutates which evaluators are active, does not destroy data, expose
+    credentials, or enable live trading. See
+    `octobot_mcp.tools.trading_config.update_evaluator_config`'s docstring
+    for the full verified request/response shape.
     """

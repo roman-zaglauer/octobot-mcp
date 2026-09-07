@@ -41,6 +41,10 @@ tool exists (FR-27's own contingency: confirmed live this session that
 `get_all_symbols` already returns identical data). `get_job_status`/
 `list_jobs`/`cancel_job`/`get_job_result` are reused unchanged for
 `kind: "data_collection"` jobs (ADR-0007) -- no new tool names for those.
+Task 16 (item 16, FR-28, a genuinely new-scope addendum closing an
+evaluator-CRUD gap) adds `update_evaluator_config` (not confirm-gated, same
+`POST /config` route and reasoning as `update_trading_config`, a sibling
+`EVALUATOR_CONFIG_KEY` branch).
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
@@ -63,7 +67,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_15_TOOL_NAMES = {
+EXPECTED_TASK_16_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -99,6 +103,7 @@ EXPECTED_MILESTONE_15_TOOL_NAMES = {
     "get_logs",
     "export_logs",
     "update_trading_config",
+    "update_evaluator_config",
     "cancel_order",
     "close_position",
     "refresh_portfolio",
@@ -123,9 +128,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_15_tools(client: Client):
+async def test_server_lists_the_task_16_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_15_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_TASK_16_TOOL_NAMES
 
 
 @pytest.mark.anyio

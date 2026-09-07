@@ -238,3 +238,41 @@ global project standards.
     still-running collection; `delete_data_file` refusing without
     `confirm=true` and then removing the file with `confirm=true`;
     `import_data_file` uploading a file obtained out of band.
+
+16. **`update_evaluator_config` — new scope addendum, closing an
+    evaluator-CRUD gap.**
+    Not one of the original 14 milestones or a backlog-gap addendum like
+    13.5/13.6 — genuinely new capability, added after investigating whether
+    evaluator activation is controllable via the API (it is, via the same
+    `POST /config` route `update_trading_config` already uses, on a sibling
+    branch). Traces to FR-28 (requirements doc) and the `update_evaluator_config`
+    subsection of the tool spec's "Trading config" section.
+
+    **First, resolve open questions #12/#13 against source** (grep for
+    `EVALUATOR_CONFIG_KEY`'s literal value next to `TRADING_CONFIG_KEY`'s in
+    the same controller module; trace `models.update_tentacles_activation_config`'s
+    `deactivate_others` parameter to confirm its effect on evaluators not
+    named in `patch`). Record both findings in the tool's docstring — do not
+    ship this tool with either left as a guess.
+
+    **Then implement** `update_evaluator_config(patch, deactivate_others=False)`
+    in `octobot_mcp.tools.trading_config`, alongside `update_trading_config`
+    (same module — same spec section, same route, same underlying model
+    call; splitting it into its own module would separate two tools that
+    share everything but one dict key and one extra argument). Not
+    confirm-gated, same ADR-0003 reasoning as `update_trading_config`
+    (FR-28). Output shape mirrors `update_trading_config`'s: passthrough of
+    whatever OctoBot echoes back for `EVALUATOR_CONFIG_KEY`, not an invented
+    field name.
+
+    Register the new tool (`register_all`), update `README.md`'s tool count/
+    list and `server.py`'s `INSTRUCTIONS` constant to mention it, following
+    this project's established practice of keeping both in sync with every
+    new tool (reinforced by milestone 15's judge feedback).
+
+    **Demo:** agent updates the evaluator activation config for the current
+    profile (e.g. disables one evaluator, enables another) and sees the
+    change reflected in the echoed output; a follow-up `get_tentacle_config`
+    against one of the affected evaluator tentacles confirms the change
+    actually took effect on the OctoBot instance, not just in the echoed
+    response.

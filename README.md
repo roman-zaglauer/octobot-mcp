@@ -87,7 +87,7 @@ claude mcp add octobot --env OCTOBOT_BASE_URL=http://192.168.178.100:5001 -- /ab
 ```
 
 Then run `/mcp` inside a Claude Code session to confirm `octobot` is
-connected and lists 43 tools.
+connected and lists 44 tools.
 
 ## Available tools
 
@@ -108,9 +108,9 @@ connected and lists 43 tools.
   `check_accounts_compatible`, `get_exchange_details`,
   `update_exchange_credentials` (confirm-gated)
 - **Tentacle & trading config**: `get_tentacle_config`,
-  `update_tentacle_config`, `update_trading_config`, `export_logs`,
-  `list_tentacles` (stub — no JSON API exists), `get_logs` (stub — no JSON
-  API exists)
+  `update_tentacle_config`, `update_trading_config`, `update_evaluator_config`,
+  `export_logs`, `list_tentacles` (stub — no JSON API exists), `get_logs`
+  (stub — no JSON API exists)
 - **Historical data collection** (async — `start_data_collection` reuses
   the same `job_id`/`get_job_status`/`cancel_job`/`get_job_result` pattern
   as `start_backtest`, above): `start_data_collection`, `list_data_files`,

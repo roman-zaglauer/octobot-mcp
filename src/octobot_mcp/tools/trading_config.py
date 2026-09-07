@@ -80,6 +80,68 @@ does not destroy data, expose credentials, or enable live trading -- no
 No `from __future__ import annotations` here: see
 `octobot_mcp.tools._shared.with_error_handling`'s docstring for why
 postponed annotations would silently break this module's Context injection.
+
+## `update_evaluator_config` (task 16, docs/tasklist.md item 16, FR-28)
+
+Added after v1 shipped, closing a gap surfaced while answering a user
+question about evaluator CRUD. Shares this module rather than getting its
+own (per the tasklist's own reasoning): same `POST /config` route, same
+underlying `models.update_tentacles_activation_config` function as
+`update_trading_config` above, just a different top-level request-body key
+plus one extra argument that tool's branch doesn't pass.
+
+### Source verification this session, resolving both `[UNVERIFIED]` items the
+tool spec and requirements doc (FR-28, open questions #12/#13) flagged
+
+Read `constants.py`, `controllers/configuration.py::config()`, `models/
+configuration.py::update_tentacles_activation_config`, `octobot_tentacles_
+manager/api/configurator.py::update_activation_configuration`, and
+`octobot_tentacles_manager/configuration/tentacles_setup_configuration.py`
+(`Services/Interfaces/web_interface/` and `packages/tentacles_manager/
+octobot_tentacles_manager/`, `Drakkar-Software/OctoBot`, master branch)
+directly from GitHub:
+
+- **`EVALUATOR_CONFIG_KEY = "evaluator_config"`** -- the exact literal
+  request-body key (confirmed, `constants.py`, the line right after
+  `TRADING_CONFIG_KEY`'s own). Resolves open question #12.
+- The route body confirms `patch` is submitted the same unwrapped,
+  un-nested way as `update_trading_config`'s `patch`, under the top-level
+  `"evaluator_config"` key: `if constants.EVALUATOR_CONFIG_KEY in
+  request_data and request_data[constants.EVALUATOR_CONFIG_KEY]: ...
+  success = success and models.update_tentacles_activation_config(
+  request_data[constants.EVALUATOR_CONFIG_KEY], deactivate_others)`.
+- **`deactivate_others` is a SEPARATE top-level request-body key, not
+  nested inside the `evaluator_config` patch dict** -- a genuine spec
+  correction to the tool spec's inference. The route reads it as its own
+  sibling key: `deactivate_others = False; if constants.DEACTIVATE_OTHERS
+  in request_data: deactivate_others = request_data[constants.
+  DEACTIVATE_OTHERS]` (`constants.DEACTIVATE_OTHERS = "deactivate_others"`,
+  confirmed). So the actual outgoing JSON body this tool sends is
+  `{"evaluator_config": patch, "deactivate_others": <bool>}` -- two
+  top-level keys, never one nested under the other.
+- **`deactivate_others`'s exact semantics, resolving open question #13**:
+  traced `models.update_tentacles_activation_config(new_config,
+  deactivate_others)` into `tentacles_manager_api.
+  update_activation_configuration(tentacles_setup_config, new_config,
+  deactivate_others)` into `TentaclesSetupConfiguration.
+  update_activation_configuration`'s own body. After applying every
+  `element_name -> activated` pair in `patch` as before, when
+  `deactivate_others` is `True` it additionally calls
+  `self._deactivate_other_evaluators(new_config)`, whose body iterates
+  EVERY currently-tracked tentacle of ANY type (trading modes, strategies,
+  evaluators) that is currently active and NOT a key in `patch`, and for
+  each one checks `get_simple_tentacle_type()` against the four evaluator
+  subtypes (`TENTACLES_EVALUATOR_TA_PATH`/`_SOCIAL_PATH`/`_REALTIME_PATH`/
+  `_SCRIPTED_PATH`) -- ONLY tentacles matching one of those four subtypes
+  are force-deactivated; trading modes and strategies are never touched by
+  this step regardless of `deactivate_others`. Confirmed, not inferred:
+  `deactivate_others=True` means "treat `patch` as the exhaustive set of
+  evaluators that should remain enabled -- every OTHER currently-active
+  evaluator (never a trading mode or strategy) gets force-disabled";
+  `deactivate_others=False` (this tool's default, matching both the spec's
+  direction and the conservative choice) is purely additive -- only the
+  evaluators named in `patch` have their activation state touched, every
+  other tentacle's state is left exactly as it was.
 """
 
 from typing import Any
@@ -90,6 +152,7 @@ from mcp.server.mcpserver.context import Context
 
 from octobot_mcp.context import get_client
 from octobot_mcp.errors import (
+    EvaluatorConfigUpdateRejectedError,
     OctoBotConnectionError,
     OctoBotMalformedResponseError,
     OctoBotTimeoutError,
@@ -100,6 +163,9 @@ from octobot_mcp.tools._shared import with_error_handling
 _CONFIG_PATH = "/config"
 _TRADING_CONFIG_KEY = "trading_config"
 _TRADING_UPDATED_CONFIG_KEY = "trading_updated_config"
+_EVALUATOR_CONFIG_KEY = "evaluator_config"
+_EVALUATOR_UPDATED_CONFIG_KEY = "evaluator_updated_config"
+_DEACTIVATE_OTHERS_KEY = "deactivate_others"
 
 
 async def _request_raw(
@@ -203,6 +269,77 @@ async def update_trading_config(ctx: Context, patch: dict[str, Any]) -> Any:
     return {_TRADING_UPDATED_CONFIG_KEY: body[_TRADING_UPDATED_CONFIG_KEY]}
 
 
+@with_error_handling
+async def update_evaluator_config(
+    ctx: Context, patch: dict[str, Any], deactivate_others: bool = False
+) -> Any:
+    """Update the current profile's evaluator-activation config.
+
+    Maps to `POST /config`, JSON body `{"evaluator_config": patch,
+    "deactivate_others": deactivate_others}` -- TWO top-level keys, never one
+    nested under the other -- see this module's docstring for the full
+    source-verified derivation of this exact shape and the request-body
+    key's literal value (`EVALUATOR_CONFIG_KEY = "evaluator_config"`,
+    resolving the tool spec's/requirements doc's open question #12). `patch`
+    is submitted as-is, unwrapped, mapping evaluator class names to a
+    boolean (or `"true"`/`"false"` string) activation state -- the same
+    shape `update_trading_config` submits under its own key, since both
+    reach the same underlying `models.update_tentacles_activation_config`.
+
+    `deactivate_others` (default `False`, resolving open question #13):
+    when `True`, every OTHER currently-active evaluator NOT named in `patch`
+    is force-disabled -- confirmed by tracing `models.
+    update_tentacles_activation_config` into `TentaclesSetupConfiguration.
+    update_activation_configuration`/`_deactivate_other_evaluators`'s own
+    body (see this module's docstring for the full trace); this only ever
+    touches tentacles whose type is one of the four evaluator subtypes
+    (technical-analysis/social/real-time/scripted) -- trading modes and
+    strategies are never affected by this flag. `False` (this tool's
+    default) is purely additive: only the evaluators named in `patch` have
+    their activation state changed, every other tentacle is left untouched.
+
+    Output: `{"evaluator_updated_config": <passthrough of OctoBot's own
+    echoed value for this key from its success response>}` -- matches the
+    route's own response shape (NFR-8), by direct analogy to
+    `update_trading_config`'s own confirmed `{"trading_updated_config": ...}`
+    shape (same response envelope, different key extracted).
+
+    Not confirm-gated (ADR-0003): mutates which evaluators are active, does
+    not destroy data, expose credentials, or enable live trading. Raises
+    `EvaluatorConfigUpdateRejectedError` on any non-2xx response -- see this
+    module's docstring for why, for this tool's own request shape, OctoBot's
+    own error text is confirmed to always be an empty string in practice
+    (the `evaluator_config` branch never populates the route's own
+    `err_message` variable, exactly like the `trading_config` branch
+    `update_trading_config` documents).
+    """
+    client = get_client(ctx)
+    response = await _request_raw(
+        client,
+        "POST",
+        _CONFIG_PATH,
+        json={_EVALUATOR_CONFIG_KEY: patch, _DEACTIVATE_OTHERS_KEY: deactivate_others},
+    )
+    if response.status_code >= 400:
+        raise EvaluatorConfigUpdateRejectedError(
+            f"OctoBot rejected update_evaluator_config: {_extract_error_text(response)}"
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise OctoBotMalformedResponseError(
+            "OctoBot returned a 2xx response with a non-JSON body for "
+            f"POST {_CONFIG_PATH} (evaluator_config)."
+        ) from exc
+    if not isinstance(body, dict) or _EVALUATOR_UPDATED_CONFIG_KEY not in body:
+        raise OctoBotMalformedResponseError(
+            f"OctoBot's 2xx response for POST {_CONFIG_PATH} (evaluator_config) "
+            f"had no {_EVALUATOR_UPDATED_CONFIG_KEY!r} key: {body!r}"
+        )
+    return {_EVALUATOR_UPDATED_CONFIG_KEY: body[_EVALUATOR_UPDATED_CONFIG_KEY]}
+
+
 def register(mcp: MCPServer) -> None:
-    """Register this module's tool onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
+    """Register this module's tools onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
     mcp.tool()(update_trading_config)
+    mcp.tool()(update_evaluator_config)
