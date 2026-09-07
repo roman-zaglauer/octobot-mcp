@@ -1,0 +1,51 @@
+# CI
+#
+# Trigger: every push to `main` and every pull request targeting any branch.
+# Purpose: install the package (editable, with the `dev` extra) and run the
+#   fully-mocked pytest suite across the Python versions supported by
+#   `requires-python` in pyproject.toml (>=3.10). The suite makes no live
+#   OctoBot or network calls (all HTTP/Socket.IO traffic is mocked), so this
+#   workflow needs no secrets, environment variables, or external services.
+# Security posture: default-deny permissions, only `contents: read` granted
+#   at the job level (checkout only, no write access anywhere); all actions
+#   are pinned to a full commit SHA with the corresponding tag documented
+#   alongside; no OIDC/cloud credentials are needed for this workflow.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest -q

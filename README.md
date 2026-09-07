@@ -1,13 +1,24 @@
 # OctoBot MCP Server
 
-An MCP (Model Context Protocol) server that wraps a single [OctoBot](https://github.com/Drakkar-Software/OctoBot)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+
+<!-- TODO: replace OWNER/REPO in the CI badge URL above with this repo's real GitHub org/name once it has a remote. -->
+
+An MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) server
+that wraps a single [OctoBot](https://github.com/Drakkar-Software/OctoBot)
 instance's web API so an AI agent (e.g. Claude Code) can manage trading
 profiles, run and compare backtests, and drive OctoBot's portfolio/trading,
-exchange, and tentacle-config surfaces.
+exchange, and tentacle-config surfaces — all through OctoBot's existing HTTP
+API, without you hand-writing a client for it.
 
-See `docs/requirements/octobot-mcp-requirements.md`, `docs/specs/octobot-mcp-tool-spec.md`,
-and `docs/adr/` for the full design, and `docs/tasklist.md` for the build
-history.
+Use this if you already run an OctoBot instance and want an agent to operate
+it (list/create/switch profiles, kick off and compare backtests, check
+positions and PnL, tweak tentacle/trading config) instead of clicking through
+OctoBot's web UI yourself. It is not a trading strategy, a replacement for
+OctoBot itself, or a multi-instance fleet manager (see "Design docs" below
+for what's explicitly out of scope and why).
 
 **Status: v1 complete.** All 14 tasklist milestones (plus three small
 addenda closing gaps found during review) are implemented, judge-verified,
@@ -101,6 +112,10 @@ connected and lists 38 tools.
   `list_tentacles` (stub — no JSON API exists), `get_logs` (stub — no JSON
   API exists)
 
+Any tool marked "confirm-gated" refuses to act unless called with
+`confirm=true`, returning a structured explanation instead (ADR-0003) — see
+`mcp.instructions`' "Safety" section for the full rationale.
+
 ## Test
 
 ```bash
@@ -109,7 +124,8 @@ pytest
 
 294 tests, no live instance required — every test mocks the OctoBot HTTP/
 Socket.IO layer. Live verification against a real instance was done
-per-milestone during development (see each milestone's commit message).
+per-milestone during development (see each milestone's commit message). CI
+runs this same suite on every push and pull request (see the CI badge above).
 
 ## Design docs
 
@@ -122,3 +138,17 @@ per-milestone during development (see each milestone's commit message).
   design, and ETA algorithm
 - `docs/tasklist.md` — the build roadmap, in the order it was actually
   implemented
+
+## Contributing
+
+Bug reports and pull requests are welcome — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for how to set up a dev environment, the
+project's conventions, and how to submit a change. Please also read the
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Found a security issue,
+especially anything touching exchange credential handling? See
+[`.github/SECURITY.md`](.github/SECURITY.md) instead of filing a public
+issue.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
