@@ -213,6 +213,53 @@ original reasoning that these are routine, expected trading-bot actions.
   whenever it finds zero enabled *real* (non-simulated) traders across every
   connected exchange -- an entirely expected outcome on any OctoBot instance
   running only simulated trading, not a bug).
+
+Milestone 15 (docs/tasklist.md item 15, ADR-0007/ADR-0008, the historical-
+data-collection addendum) adds four more. Defined here, before
+`octobot_mcp.tools.data_collection` (the one module that raises all four),
+per this project's own established ordering convention (a reviewer-caught
+bug in an earlier draft of this exact milestone reintroduced the opposite
+ordering; see that module's docstring):
+- `DataCollectionStartFailedError` -- `start_data_collection` failed to
+  submit a run to OctoBot (confirmed against source and this milestone's
+  own live verification session, `POST /data_collector?action_type=
+  start_collector`: its only non-raising failure path returns `(False,
+  <message>)`, surfaced by the controller as an HTTP 500 whose body is that
+  plain-text message -- e.g. "Backtesting is disabled.", "Please select an
+  exchange.", "Please select a trading pair.", `_ensure_backtesting_limits`'s
+  own message (exact text still unconfirmed -- see
+  `octobot_mcp.tools.data_collection`'s module docstring), or the verbatim
+  `"Can't collect data for {symbols} on {exchange} (Historical data
+  collector is already running)"` one-at-a-time guard, reproduced live this
+  session). Mirrors `BacktestStartFailedError`'s role for `start_backtest`.
+- `DataFileScrapeContractBrokenError` -- the `GET /data_collector` Tier-B
+  scrape adapter's structural assumptions about its rendered
+  `tr.selectable_datafile` rows didn't hold (ADR-0008, NFR-13). Named in
+  parallel to, and never conflated with, `ProfileScrapeContractBrokenError`
+  above -- this project's established one-domain-specific-exception-class-
+  per-adapter convention, not a shared generic one.
+- `DataFileDeleteRejectedError` -- `delete_data_file` failed (confirm-gated,
+  ADR-0003/FR-25). Raised only after the caller has already confirmed
+  (`confirm=true`) -- see `octobot_mcp.tools._shared.require_confirmation`
+  for the unconfirmed path, which is a normal return, not an exception.
+  Wraps OctoBot's own `f"Can't delete {file_name} ({error})"` text,
+  reproduced verbatim against the live instance this session (e.g.
+  `"Can't delete does_not_exist.data (file can't be found)")`).
+- `DataFileImportFailedError` -- `import_data_file` failed. This session's
+  live verification found the SAME invisible-at-the-HTTP-level outcome
+  `octobot_mcp.tools.profiles._create_profile_import_file` already
+  documents for `create_profile(mode="import_file")`: `POST
+  /data_collector?action_type=import_data_file` always responds HTTP 200
+  with the full re-rendered `/data_collector` page, on both a genuinely
+  saved file and a rejected one (confirmed live with both garbage bytes and
+  a syntactically valid but semantically-wrong SQLite file, neither of
+  which OctoBot's own `models.save_data_file` accepted, and neither of
+  which produced any inspectable error text in the response body or a
+  session cookie) -- so this tool determines the outcome the same
+  before/after `list_data_files()` diff `_create_profile_import_file` uses,
+  not by parsing a response message (the spec's assumption of a readable
+  OctoBot success/failure message for this route did not hold up against
+  the live instance).
 """
 
 from __future__ import annotations
@@ -527,4 +574,72 @@ class PortfolioRefreshFailedError(OctoBotAPIError):
     (confirmed against source `octobot_services.interfaces.util.portfolio::
     async_trigger_portfolios_refresh`) -- an entirely expected outcome on any
     instance running only simulated trading, not a bug.
+    """
+
+
+class DataCollectionStartFailedError(OctoBotAPIError):
+    """`start_data_collection` failed to start a run (milestone 15, ADR-0007).
+
+    Wraps OctoBot's own error text from a failed `POST /data_collector
+    ?action_type=start_collector` (confirmed against source and this
+    milestone's own live verification session: its only non-raising failure
+    path returns `(False, <message>)`, surfaced by the controller as an HTTP
+    500 whose body is that plain-text message), including OctoBot's own
+    one-at-a-time guard text (`"Can't collect data for {symbols} on
+    {exchange} (Historical data collector is already running)"`, reproduced
+    verbatim live this session). See
+    `octobot_mcp.tools.data_collection.start_data_collection`'s docstring
+    for the full verified request/response shape.
+    """
+
+
+class DataFileScrapeContractBrokenError(OctoBotAPIError):
+    """The `GET /data_collector` HTML page's structure didn't match this
+    server's second Tier-B scrape adapter's expectations (ADR-0008, NFR-13).
+
+    Raised the moment any structural assumption is violated -- e.g. zero
+    `tr.selectable_datafile` rows' parent table found, a row missing an
+    expected `<td>`, or the delete button's `data-file` attribute absent --
+    so a scrape-contract drift surfaces as a loud, distinct, actionable
+    failure instead of a silent empty/partial file list indistinguishable
+    from "no data files exist." Named in parallel to, and never conflated
+    with, `ProfileScrapeContractBrokenError` above -- one domain-specific
+    exception class per adapter, this project's established convention. See
+    `octobot_mcp.tools.data_collection.list_data_files` for the exact
+    assumptions this guards.
+    """
+
+
+class DataFileDeleteRejectedError(OctoBotAPIError):
+    """`delete_data_file` failed (milestone 15, ADR-0007/ADR-0008, FR-25).
+
+    Raised only after the caller has already confirmed (`confirm=true`) --
+    see `octobot_mcp.tools._shared.require_confirmation` for the unconfirmed
+    path, which is a normal return, not an exception. Wraps OctoBot's own
+    `f"Can't delete {file_name} ({error})"` text from `POST /data_collector
+    ?action_type=delete_data_file` (confirmed against source and reproduced
+    verbatim against the live instance this session, e.g. `"Can't delete
+    does_not_exist.data (file can't be found)"`). See
+    `octobot_mcp.tools.data_collection.delete_data_file`'s docstring for the
+    full verified request/response shape, including why `delete_data_file`
+    is confirm-gated (a reversal from this addendum's original draft).
+    """
+
+
+class DataFileImportFailedError(OctoBotAPIError):
+    """`import_data_file` failed (milestone 15, ADR-0007/ADR-0008).
+
+    This tool's outcome is determined by a before/after `list_data_files()`
+    diff, not by parsing an OctoBot response message: this session's live
+    verification found `POST /data_collector?action_type=import_data_file`
+    always responds HTTP 200 with the full re-rendered `/data_collector`
+    page, on both a genuinely saved file and a rejected one, with no
+    inspectable error text anywhere in the response -- the same
+    invisible-at-the-HTTP-level outcome
+    `octobot_mcp.tools.profiles._create_profile_import_file` already
+    documents for `create_profile(mode="import_file")`. Raised when the
+    uploaded `filename` cannot be found in `list_data_files()`'s output
+    after the upload. See
+    `octobot_mcp.tools.data_collection.import_data_file`'s docstring for the
+    full detail.
     """

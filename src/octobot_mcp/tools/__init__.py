@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from octobot_mcp.tools import (
     backtesting,
+    data_collection,
     exchanges,
     jobs,
     portfolio,
@@ -37,3 +38,4 @@ def register_all(mcp: "MCPServer") -> None:
     backtesting.register(mcp)
     tentacles.register(mcp)
     trading_config.register(mcp)
+    data_collection.register(mcp)

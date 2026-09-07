@@ -62,6 +62,23 @@ Socket.IO/HTTP -- `progress_notifier` is stored and read back as an opaque
 "pure infrastructure" framing above still holds: it holds the reference the
 same way `track_watcher_task` holds an `asyncio.Task` reference, without
 itself ever calling it.
+
+Milestone 15 (docs/tasklist.md item 15, ADR-0007, the historical-data-
+collection addendum) widens `JobKind` with a third value, `"data_collection"`,
+and adds `JobStore.data_collection_execution_lock` -- a SECOND, independent
+`asyncio.Lock`, reflecting OctoBot's own separate one-data-collection-at-a-
+time constraint (confirmed against source to be a genuinely distinct
+resource from the one-backtest-at-a-time constraint `backtest_execution_lock`
+already reflects: a different guard, a different "already running" message,
+a different registered tool reference -- see ADR-0007's Context section).
+Per that ADR's own "generic across kind" proof (re-confirmed there by
+re-reading this module in full): **no other change to this module is
+needed** -- every mutator method (`create_job`/`start`/`complete`/`fail`/
+`cancel`/`confirm_cancelled`/`record_watcher_tick`/`append_error`/
+`track_watcher_task`/`set_progress_notifier`) already works unchanged for
+the new kind, since none of them branch on `kind` anywhere. Reachable the
+same dependency-injected way (NFR-11) as `backtest_execution_lock`:
+`get_job_store(ctx).data_collection_execution_lock`.
 """
 
 from __future__ import annotations
@@ -80,7 +97,7 @@ from octobot_mcp.eta import bound_samples, estimate_eta
 
 _logger = logging.getLogger(__name__)
 
-JobKind = Literal["backtest", "compare_strategies"]
+JobKind = Literal["backtest", "compare_strategies", "data_collection"]
 JobState = Literal["queued", "running", "completed", "failed", "cancelled"]
 EtaConfidence = Literal["low", "medium", "high"]
 
@@ -203,6 +220,14 @@ class JobStore:
     def __init__(self) -> None:
         self._jobs: dict[str, JobRecord] = {}
         self.backtest_execution_lock: Lock = Lock()
+        #: Milestone 15 (ADR-0007 decision point 3/NFR-15): a SECOND,
+        #: independent lock for OctoBot's own separate one-data-collection-
+        #: at-a-time constraint -- never conflated with
+        #: `backtest_execution_lock` above (see this module's own docstring).
+        #: `start_data_collection` acquires this one; `start_backtest`/
+        #: `compare_strategies` never touch it, and vice versa, so a
+        #: concurrent backtest and data collection never block each other.
+        self.data_collection_execution_lock: Lock = Lock()
         #: Strong references to in-flight watcher tasks, keyed by job_id.
         #: See `track_watcher_task`'s docstring for why this exists.
         self._watcher_tasks: dict[str, asyncio.Task] = {}

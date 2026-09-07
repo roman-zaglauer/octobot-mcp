@@ -27,8 +27,8 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from octobot_mcp.jobs import JobStore
+from octobot_mcp.tools._shared import _build_progress_notifier
 from octobot_mcp.tools.backtesting import (
-    _build_progress_notifier,
     _run_backtest_watcher,
     _run_compare_strategies,
     compare_strategies,

@@ -35,6 +35,15 @@ and confirm-gated (see Safety).
 - Backtesting & strategy comparison (asynchronous -- see next section): \
 `start_backtest`, `compare_strategies`, `get_job_status`, `list_jobs`, \
 `cancel_job`, `get_job_result`.
+- Historical data collection (asynchronous, same job pattern as \
+backtesting -- see next section): `start_data_collection` downloads real \
+exchange history so `start_backtest(mode="data_files")` has something to \
+run against; `list_data_files` discovers what's already downloaded (a \
+started collection never reports its own resulting filename -- always \
+call `list_data_files` afterward to find it); `delete_data_file` (confirm-\
+gated) removes one; `import_data_file` uploads a file obtained out of \
+band; `get_available_timeframes_for_collection` lists valid timeframes \
+for an exchange (for valid symbols, reuse the existing `get_all_symbols`).
 - Portfolio & trading: `get_orders`/`get_positions`/`get_trades`/ \
 `get_pnl_history`/`get_historical_portfolio_value` are reads; \
 `cancel_order`/`close_position`/`refresh_portfolio` are routine, ungated \
@@ -75,6 +84,10 @@ call. On a `"running"` job it only REQUESTS cancellation -- the job stays \
 `"running"` for a moment while OctoBot is told to stop, then transitions to \
 `"cancelled"` on a later `get_job_status` poll. Don't assume cancellation \
 is instant.
+- Data collection has its OWN independent one-at-a-time limit, separate \
+from backtesting's -- a `start_data_collection` job and a `start_backtest` \
+job can run genuinely concurrently, but two data collections (or two \
+backtests) still queue behind each other.
 - `compare_strategies`' `diff` table in `get_job_result` only ever includes \
 numeric fields present in EVERY successfully-completed child's report -- \
 there is no fixed field list (OctoBot's real report shape varies by \
@@ -114,6 +127,16 @@ different concept from what `convert_profile_to_live` actually sets \
 (OctoBot's internal live/backtesting profile type), and converting a \
 profile to live does not necessarily change this scraped field. Don't use \
 one as a proxy for the other.
+- A `start_data_collection` job against a bad/misspelled exchange name \
+does NOT fail -- OctoBot reports an identical `"finished"` success status \
+regardless, so a collection that produced no real data is \
+indistinguishable from a genuinely successful one by `get_job_status` \
+alone. Always confirm with `list_data_files` afterward that the expected \
+file actually appeared before relying on it.
+- `delete_data_file` is confirm-gated (unlike `cancel_order`/ \
+`close_position` above): treated as closer to the `clear_*_history` tools, \
+since re-collecting an erroneously deleted file can take minutes to hours, \
+not a quick redo.
 
 ## Safety
 

@@ -87,7 +87,7 @@ claude mcp add octobot --env OCTOBOT_BASE_URL=http://192.168.178.100:5001 -- /ab
 ```
 
 Then run `/mcp` inside a Claude Code session to confirm `octobot` is
-connected and lists 38 tools.
+connected and lists 43 tools.
 
 ## Available tools
 
@@ -111,10 +111,19 @@ connected and lists 38 tools.
   `update_tentacle_config`, `update_trading_config`, `export_logs`,
   `list_tentacles` (stub — no JSON API exists), `get_logs` (stub — no JSON
   API exists)
+- **Historical data collection** (async — `start_data_collection` reuses
+  the same `job_id`/`get_job_status`/`cancel_job`/`get_job_result` pattern
+  as `start_backtest`, above): `start_data_collection`, `list_data_files`,
+  `delete_data_file` (confirm-gated), `import_data_file`,
+  `get_available_timeframes_for_collection`. There is no separate
+  `get_available_symbols_for_collection` tool — the existing
+  `get_all_symbols` tool already returns equivalent data for this purpose.
 
 Any tool marked "confirm-gated" refuses to act unless called with
 `confirm=true`, returning a structured explanation instead (ADR-0003) — see
-`mcp.instructions`' "Safety" section for the full rationale.
+`mcp.instructions`' "Safety" section for the full rationale. `delete_data_file`
+is confirm-gated alongside `delete_profile`/`convert_profile_to_live`/the
+`clear_*_history` tools/`update_exchange_credentials`.
 
 ## Test
 

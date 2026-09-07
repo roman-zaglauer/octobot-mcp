@@ -38,6 +38,23 @@ the exact same binary-file-download Content-Disposition parsing (both
 quoted and unquoted header forms), so this is now the one shared
 implementation both consumers call rather than a second copy.
 
+Milestone 15 (docs/tasklist.md item 15, ADR-0007) moves
+`_extract_progress_token`/`_build_progress_notifier`/`_attach_progress_notifier`
+here from `octobot_mcp.tools.backtesting` -- the same
+`_parse_content_disposition_filename` precedent immediately above: they were
+originally written for `start_backtest`/`compare_strategies` alone, but
+`octobot_mcp.tools.data_collection.start_data_collection` (this milestone)
+needs the exact same "capture `ctx.session` + a caller-supplied
+`progressToken` into a callable a background watcher task can invoke long
+after the original tool call has returned" mechanism, so this is now the
+one shared implementation both consumers call. See
+`octobot_mcp.tools.backtesting`'s own module-level "Milestone 11" comment
+block for the full SDK-internals research this mechanism rests on (how
+`progressToken` reaches `ctx.request_context.meta`, why `ctx.session`
+specifically -- not `ctx` itself -- must be captured, and the real-vs-test-
+harness `Connection`/`outbound` gotcha); that research is not repeated here
+since it does not change by virtue of the move.
+
 Milestone 14 (docs/tasklist.md item 14, the error handling / resilience
 polish pass) extends `with_error_handling` itself with the spec's
 Observability section's per-call structured log line: `{tool_name, args
@@ -74,9 +91,11 @@ from collections.abc import Awaitable, Callable, Iterable
 from email.message import Message
 from typing import Any, TypeVar
 
+from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
 
 from octobot_mcp.errors import OctoBotAPIError
+from octobot_mcp.jobs import JobStore
 
 _logger = logging.getLogger(__name__)
 
@@ -368,3 +387,89 @@ def _parse_content_disposition_filename(content_disposition: str) -> str | None:
     message = Message()
     message["content-disposition"] = content_disposition
     return message.get_filename()
+
+
+# --- Milestone 15 (moved from octobot_mcp.tools.backtesting, ADR-0007): -----
+# opportunistic MCP progress notifications, shared by any job-submitting
+# tool (`start_backtest`/`compare_strategies`, and now
+# `octobot_mcp.tools.data_collection.start_data_collection`). See this
+# module's own docstring above, and `octobot_mcp.tools.backtesting`'s
+# module-level "Milestone 11" comment block, for the full research this
+# mechanism rests on -- not repeated here.
+
+
+def _extract_progress_token(ctx: Context) -> str | int | None:
+    """Read the caller-supplied `progressToken` off `ctx`, or `None` if absent.
+
+    See `octobot_mcp.tools.backtesting`'s "Milestone 11" comment block for
+    exactly how this value reaches `ctx.request_context.meta` and why it is
+    read here rather than via `ctx.report_progress` (which cannot be used
+    later, from a background watcher task, at all). A malformed `bool` value
+    can never reach here in practice (the SDK's own wire-level parsing
+    already excludes it -- `bool` is deliberately not a valid progress token
+    in the protocol, `progressToken: str | int`), but the `isinstance(...,
+    bool)` guard costs nothing and matches the same defensiveness the SDK's
+    own internals apply at the same check.
+    """
+    meta = ctx.request_context.meta
+    if not meta:
+        return None
+    token = meta.get("progress_token")
+    if isinstance(token, bool) or not isinstance(token, (str, int)):
+        return None
+    return token
+
+
+def _build_progress_notifier(
+    ctx: Context, progress_token: str | int
+) -> Callable[[float, float | None, str | None], Awaitable[None]]:
+    """Capture `ctx.session` + `progress_token` into a `(progress, total,
+    message) -> None` async callable a background watcher task can call
+    later, long after `ctx` itself (and the tool call it belongs to) has
+    gone out of scope.
+
+    See `octobot_mcp.tools.backtesting`'s "Milestone 11" comment block for
+    why `ctx.session` specifically (not `ctx` itself) is what must be
+    captured, and why this can only use `send_progress_notification` (never
+    `ctx.report_progress`). Sending is best-effort: any exception -- a
+    disconnected client, a closed connection, anything else -- is caught and
+    logged at DEBUG, never propagated, so a notification-delivery failure
+    can NEVER fail the job or the watcher loop that called this.
+    """
+    session = ctx.session
+
+    async def _notify(progress: float, total: float | None, message: str | None) -> None:
+        try:
+            await session.send_progress_notification(progress_token, progress, total, message)
+        except Exception as exc:  # noqa: BLE001 -- best-effort: never fail the watcher over this.
+            _logger.debug(
+                "Failed to send MCP progress notification for token %r (best-effort, ignored): %r",
+                progress_token,
+                exc,
+            )
+
+    return _notify
+
+
+def _attach_progress_notifier(store: JobStore, ctx: Context, job_id: str) -> None:
+    """Extract `ctx`'s `progressToken` (if any) and attach a notifier for `job_id`.
+
+    A no-op (never calls `JobStore.set_progress_notifier` at all) when the
+    caller supplied no token -- `JobRecord.progress_token`/`progress_notifier`
+    simply stay at their `None` defaults, and every watcher-tick hook already
+    treats a `None` `progress_notifier` as "nothing to do here." Shared by
+    `start_backtest`/`compare_strategies` (`octobot_mcp.tools.backtesting`)
+    and `start_data_collection` (`octobot_mcp.tools.data_collection`,
+    milestone 15) -- for `compare_strategies` specifically, only the PARENT
+    job gets a notifier, never its children (see
+    `octobot_mcp.tools.backtesting._run_compare_strategies`'s own docstring
+    for why).
+    """
+    progress_token = _extract_progress_token(ctx)
+    if progress_token is None:
+        return
+    store.set_progress_notifier(
+        job_id,
+        progress_token=progress_token,
+        notifier=_build_progress_notifier(ctx, progress_token),
+    )

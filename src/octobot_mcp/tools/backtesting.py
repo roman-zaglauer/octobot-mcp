@@ -169,7 +169,7 @@ from octobot_mcp.errors import (
     OctoBotTimeoutError,
 )
 from octobot_mcp.jobs import TERMINAL_STATES, JobRecord, JobStore
-from octobot_mcp.tools._shared import with_error_handling
+from octobot_mcp.tools._shared import _attach_progress_notifier, with_error_handling
 
 _logger = logging.getLogger(__name__)
 
@@ -269,6 +269,17 @@ _JSON_ERROR_HINT_HEADERS = {"Content-Type": "application/json"}
 
 # --- Milestone 11: opportunistic MCP progress notifications (docs/tasklist.md item 11) ---
 #
+# Milestone 15 (docs/tasklist.md item 15, ADR-0007) moved the three
+# implementation functions this research block describes
+# (`_extract_progress_token`/`_build_progress_notifier`/
+# `_attach_progress_notifier`) to `octobot_mcp.tools._shared` -- this module
+# became their second consumer's sibling module rather than their only
+# consumer once `octobot_mcp.tools.data_collection.start_data_collection`
+# needed the exact same mechanism (the `_parse_content_disposition_filename`
+# precedent from milestone 13). The research below is kept here, in place,
+# since it explains *why* the mechanism works the way it does and does not
+# change by virtue of the move; only the function bodies moved.
+#
 # ADR-0002 decision point 3: "if the caller supplies a `progressToken`, the
 # server also emits an MCP progress notification each time the watcher
 # observes a changed value. If no token is supplied ... polling still works
@@ -366,82 +377,6 @@ _JSON_ERROR_HINT_HEADERS = {"Content-Type": "application/json"}
 # 3. **`progressToken` is fully opt-in**, confirmed above (research item
 #    #3): omitted by essentially every caller in practice, never required,
 #    never an error to omit.
-
-
-def _extract_progress_token(ctx: Context) -> str | int | None:
-    """Read the caller-supplied `progressToken` off `ctx`, or `None` if absent.
-
-    See this module's "Milestone 11" comment block above for exactly how
-    this value reaches `ctx.request_context.meta` and why it is read here
-    rather than via `ctx.report_progress` (which cannot be used later, from
-    the background watcher task, at all). A malformed `bool` value can never
-    reach here in practice (the SDK's own wire-level parsing already
-    excludes it -- `bool` is deliberately not a valid progress token in the
-    protocol, `progressToken: str | int`), but the `isinstance(..., bool)`
-    guard costs nothing and matches the same defensiveness the SDK's own
-    internals apply at the same check.
-    """
-    meta = ctx.request_context.meta
-    if not meta:
-        return None
-    token = meta.get("progress_token")
-    if isinstance(token, bool) or not isinstance(token, (str, int)):
-        return None
-    return token
-
-
-def _build_progress_notifier(
-    ctx: Context, progress_token: str | int
-) -> Callable[[float, float | None, str | None], Awaitable[None]]:
-    """Capture `ctx.session` + `progress_token` into a `(progress, total,
-    message) -> None` async callable a background watcher task can call
-    later, long after `ctx` itself (and the tool call it belongs to) has
-    gone out of scope.
-
-    See this module's "Milestone 11" comment block above for why `ctx.
-    session` specifically (not `ctx` itself) is what must be captured, and
-    why this can only use `send_progress_notification` (never `ctx.
-    report_progress`). Sending is best-effort (this function's own
-    docstring's requirement, and this milestone's own explicit instruction):
-    any exception -- a disconnected client, a closed connection, anything
-    else -- is caught and logged at DEBUG, never propagated, so a
-    notification-delivery failure can NEVER fail the job or the watcher loop
-    that called this.
-    """
-    session = ctx.session
-
-    async def _notify(progress: float, total: float | None, message: str | None) -> None:
-        try:
-            await session.send_progress_notification(progress_token, progress, total, message)
-        except Exception as exc:  # noqa: BLE001 -- best-effort: never fail the watcher over this.
-            _logger.debug(
-                "Failed to send MCP progress notification for token %r (best-effort, ignored): %r",
-                progress_token,
-                exc,
-            )
-
-    return _notify
-
-
-def _attach_progress_notifier(store: JobStore, ctx: Context, job_id: str) -> None:
-    """Extract `ctx`'s `progressToken` (if any) and attach a notifier for `job_id`.
-
-    A no-op (never calls `JobStore.set_progress_notifier` at all) when the
-    caller supplied no token -- `JobRecord.progress_token`/`progress_notifier`
-    simply stay at their `None` defaults, and every watcher-tick hook below
-    already treats a `None` `progress_notifier` as "nothing to do here."
-    Shared by both `start_backtest` (the job itself) and `compare_strategies`
-    (the PARENT job only -- see `_run_compare_strategies`'s own docstring for
-    why children never get their own notifier).
-    """
-    progress_token = _extract_progress_token(ctx)
-    if progress_token is None:
-        return
-    store.set_progress_notifier(
-        job_id,
-        progress_token=progress_token,
-        notifier=_build_progress_notifier(ctx, progress_token),
-    )
 
 
 def _make_single_job_on_tick() -> Callable[[JobRecord], Awaitable[None]]:
@@ -1251,6 +1186,13 @@ async def get_job_result(ctx: Context, job_id: str) -> Any:
     result = job.result or {}
     if job.kind == "compare_strategies":
         return {"comparison": result.get("comparison", []), "diff": result.get("diff")}
+    if job.kind == "data_collection":
+        # Milestone 15 (ADR-0007 decision point 5): an honest echo of the
+        # request plus OctoBot's own completion message -- deliberately no
+        # fabricated filename (see octobot_mcp.tools.data_collection's
+        # module docstring). Stored once, at state="completed" (INV-3
+        # unchanged), by that module's own watcher.
+        return job.result
     return {"report": result.get("report"), "trades": result.get("trades")}
 
 

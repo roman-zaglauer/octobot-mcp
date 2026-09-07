@@ -30,16 +30,26 @@ milestone 13.6 (item 13.6) adds `cancel_order`/`close_position`/
 confirm-gated (the user was explicitly asked about the spec's own footnote
 flagging `cancel_order`/`close_position` as "revisitable" given their
 irreversible effect, and chose to keep both ungated, per ADR-0003's
-original reasoning).
+original reasoning); milestone 15 (item 15, ADR-0007/ADR-0008, a genuinely
+new-scope addendum) adds `start_data_collection` (not confirm-gated, same
+reasoning as `start_backtest`), `list_data_files`/
+`get_available_timeframes_for_collection` (read-only Tier-B/Tier-A reads),
+`import_data_file` (not confirm-gated, creates new state only), and
+`delete_data_file` (**confirm-gated**, reversed from this addendum's
+original draft -- see FR-25). No `get_available_symbols_for_collection`
+tool exists (FR-27's own contingency: confirmed live this session that
+`get_all_symbols` already returns identical data). `get_job_status`/
+`list_jobs`/`cancel_job`/`get_job_result` are reused unchanged for
+`kind: "data_collection"` jobs (ADR-0007) -- no new tool names for those.
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
 `test_tools_portfolio.py`/`test_tools_exchanges.py`/`test_tools_profiles.py`/
 `test_tools_profiles_gated.py`/`test_tools_jobs.py`/`test_tools_backtesting.py`/
 `test_tools_tentacles.py`/`test_tools_trading_config.py`/
-`test_tools_portfolio_trading_actions.py` for per-tool behavior and
-`test_server_tools_integration.py` for an end-to-end call through this same
-`mcp` wiring.
+`test_tools_portfolio_trading_actions.py`/`test_tools_data_collection.py`
+for per-tool behavior and `test_server_tools_integration.py` for an
+end-to-end call through this same `mcp` wiring.
 
 Since milestone 3 also wires `mcp`'s real `app_lifespan` (NFR-11) into
 this module-level `mcp` instance, connecting a `Client` to it now runs
@@ -53,7 +63,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_MILESTONE_13_6_TOOL_NAMES = {
+EXPECTED_MILESTONE_15_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -92,6 +102,11 @@ EXPECTED_MILESTONE_13_6_TOOL_NAMES = {
     "cancel_order",
     "close_position",
     "refresh_portfolio",
+    "start_data_collection",
+    "list_data_files",
+    "delete_data_file",
+    "import_data_file",
+    "get_available_timeframes_for_collection",
 }
 
 
@@ -108,9 +123,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_milestone_13_6_tools(client: Client):
+async def test_server_lists_the_milestone_15_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_13_6_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_15_TOOL_NAMES
 
 
 @pytest.mark.anyio
