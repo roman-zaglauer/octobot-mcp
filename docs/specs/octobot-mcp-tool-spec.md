@@ -624,6 +624,32 @@ OctoBot).
 - Log line per watcher loop error (not just terminal failure): so a
   transient Socket.IO hiccup is visible even if the job ultimately recovers.
 
+**Destination (task 17, FR-29, NFR-16 — closing a gap where the above was
+implemented as `logging.getLogger(__name__)` calls but never wired to any
+configured handler, so it was silently dropped)**: since this is a stdio MCP
+server, stdout is reserved for the JSON-RPC transport (writing logs there
+would corrupt the protocol stream), so `main()` configures, once, before
+`mcp.run()`:
+- A `RotatingFileHandler` (all configured levels) at a path controlled by
+  `OCTOBOT_MCP_LOG_FILE` (default: `~/.octobot-mcp/server.log`, directory
+  created if missing), bounded by `OCTOBOT_MCP_LOG_MAX_BYTES`/
+  `OCTOBOT_MCP_LOG_BACKUP_COUNT` (defaults: 5MB × 3 backups, NFR-16).
+- A `StreamHandler(sys.stderr)` at `WARNING`+ only, so a crashed/misbehaving
+  process still surfaces something to whatever the MCP client captures from
+  the subprocess, without flooding stderr with per-call `INFO` lines.
+- Overall level via `OCTOBOT_MCP_LOG_LEVEL` (default `INFO`).
+- No new MCP tool exposes this file's contents: unlike OctoBot's own logs
+  (`export_logs`/`get_logs`, remote-only, reachable solely via HTTP), this
+  server's log file already lives on the same local filesystem as the
+  process that launched this stdio subprocess (ADR-0001) — a dedicated
+  retrieval tool would be redundant plumbing for something already directly
+  readable. The file's path is documented in `server.py`'s `INSTRUCTIONS`
+  and `README.md` instead.
+- Configuration happens only inside `main()`/`__main__`, never at module
+  import time — so importing tool modules under `pytest` (or any other
+  embedding) never creates a log file or attaches a handler as a side
+  effect.
+
 ## Security & privacy
 - Data classification: exchange API key/secret is the only sensitive data
   class. It is redacted (last-4-chars-only) in all outputs and logs (NFR-6,

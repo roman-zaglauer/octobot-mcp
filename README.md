@@ -125,13 +125,31 @@ Any tool marked "confirm-gated" refuses to act unless called with
 is confirm-gated alongside `delete_profile`/`convert_profile_to_live`/the
 `clear_*_history` tools/`update_exchange_credentials`.
 
+## Logging
+
+The server's own structured logs (one line per tool call, one per job state
+transition — see `docs/specs/octobot-mcp-tool-spec.md`'s "Observability"
+section) are written to a local rotating log file, not exposed through any
+MCP tool. Configured once, in `main()`, before the transport starts:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `OCTOBOT_MCP_LOG_FILE` | `~/.octobot-mcp/server.log` | Log file path (parent directory created if missing) |
+| `OCTOBOT_MCP_LOG_LEVEL` | `INFO` | Root logger level for the file handler |
+| `OCTOBOT_MCP_LOG_MAX_BYTES` | `5000000` | Rotation size threshold |
+| `OCTOBOT_MCP_LOG_BACKUP_COUNT` | `3` | Number of rotated backups kept |
+
+A separate stderr handler, fixed at `WARNING`+ regardless of
+`OCTOBOT_MCP_LOG_LEVEL`, ensures a crashing process still surfaces something
+to whatever the MCP client captures from the subprocess.
+
 ## Test
 
 ```bash
 pytest
 ```
 
-294 tests, no live instance required — every test mocks the OctoBot HTTP/
+346 tests, no live instance required — every test mocks the OctoBot HTTP/
 Socket.IO layer. Live verification against a real instance was done
 per-milestone during development (see each milestone's commit message). CI
 runs this same suite on every push and pull request (see the CI badge above).

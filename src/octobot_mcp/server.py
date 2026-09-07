@@ -14,9 +14,12 @@ tool descriptions) -- kept here, not inline in the `MCPServer(...)` call, so
 it reads like the rest of this project's other prose-heavy module docstrings.
 """
 
+import logging
+
 from mcp.server import MCPServer
 
 from octobot_mcp.context import app_lifespan
+from octobot_mcp.logging_config import configure_logging
 from octobot_mcp.tools import register_all
 
 INSTRUCTIONS = """\
@@ -25,6 +28,13 @@ for the whole process (the `OCTOBOT_BASE_URL` environment variable set when \
 this server was launched) -- no tool takes an instance/base URL parameter. \
 There is no login/auth at this MCP layer or against OctoBot itself (v1 only \
 supports instances with OctoBot's own login disabled).
+
+This server's OWN structured logs (one line per tool call, one per job state \
+transition) are written to a local rotating log file, not exposed through any \
+tool -- it already lives on the same filesystem as whatever process launched \
+this stdio subprocess. Default path: `~/.octobot-mcp/server.log` (5MB x 3 \
+rotated backups), overridable via `OCTOBOT_MCP_LOG_FILE`/`OCTOBOT_MCP_LOG_LEVEL`/ \
+`OCTOBOT_MCP_LOG_MAX_BYTES`/`OCTOBOT_MCP_LOG_BACKUP_COUNT`.
 
 ## Tool groups
 
@@ -158,12 +168,40 @@ confirm-gated even though they have real effects, since they're expected, \
 everyday operations for a trading bot, not rare/catastrophic mistakes.\
 """
 
+# The MCP SDK's own `MCPServer.__init__` unconditionally calls its internal
+# `mcp.server.mcpserver.utilities.logging.configure_logging()`, which calls
+# `logging.basicConfig(level="INFO", handlers=[RichHandler(...)])` on the ROOT
+# logger as a side effect of construction -- at IMPORT time, since `mcp`
+# below is a module-level instance. Because the root logger has no handlers
+# yet at that point, `basicConfig` doesn't just attach the handler: per
+# `logging.basicConfig`'s own semantics, it also unconditionally calls
+# `root.setLevel("INFO")`, a SEPARATE side effect independent of the handler
+# list. Both undermine this module's own invariant (task 17, FR-29): only
+# this project's `configure_logging()` may touch root-logger handlers/level,
+# and only when `main()` calls it explicitly, never as an import-time side
+# effect (see `tests/test_logging_config.py`'s subprocess-based regression
+# test, which caught the handler half of this from a clean interpreter).
+# Snapshot both the handler list and the level immediately before
+# construction, then restore both right after -- a diff/restore, not an
+# unconditional reset, so this stays a targeted workaround for the SDK's own
+# behavior and doesn't mask a real handler- or level-changing regression
+# introduced elsewhere in this codebase.
+_root_logger = logging.getLogger()
+_handlers_before_mcp_construction = list(_root_logger.handlers)
+_level_before_mcp_construction = _root_logger.level
 mcp = MCPServer("OctoBot", instructions=INSTRUCTIONS, lifespan=app_lifespan)
 register_all(mcp)
+for _sdk_attached_handler in list(_root_logger.handlers):
+    if _sdk_attached_handler not in _handlers_before_mcp_construction:
+        _root_logger.removeHandler(_sdk_attached_handler)
+        _sdk_attached_handler.close()
+if _root_logger.level != _level_before_mcp_construction:
+    _root_logger.setLevel(_level_before_mcp_construction)
 
 
 def main() -> None:
     """Start the server on the stdio transport. Blocks until the client disconnects."""
+    configure_logging()
     mcp.run()
 
 

@@ -276,3 +276,59 @@ global project standards.
     against one of the affected evaluator tentacles confirms the change
     actually took effect on the OctoBot instance, not just in the echoed
     response.
+
+17. **Wire up this server's own logging — closing a gap in milestone 14's
+    own exit criterion.**
+    Milestone 14 added the structured per-call/per-job-transition
+    `logging.getLogger(__name__)` calls the tool spec's "Observability"
+    section describes (`_shared.py`, `jobs.py`, `backtesting.py`,
+    `data_collection.py`), but never configured any `logging` handler
+    anywhere in the process — confirmed by grepping the whole source tree
+    for `basicConfig`/`addHandler`/`dictConfig` and finding none. With zero
+    handlers, Python's root logger falls back to `logging.lastResort`,
+    which only ever surfaces `WARNING`+ records to stderr — every `INFO`/
+    `DEBUG` structured log line (the majority of what milestone 14 added)
+    has been silently dropped since it shipped. User-discovered gap ("Is it
+    possible to grab logs from the MCP Server"), not part of the original
+    14 milestones. Traces to FR-29/NFR-16 (requirements doc) and the tool
+    spec's "Observability" section's new "Destination" subsection.
+
+    **Implement:**
+    1. A small `octobot_mcp.logging_config` module (or a function in
+       `server.py` itself if that reads more naturally — developer's call,
+       consistent with this project's existing module-boundary judgment)
+       exposing one function, e.g. `configure_logging()`, following
+       `config.py`'s existing env-var-reading convention
+       (`OCTOBOT_BASE_URL`'s pattern: read once, dataclass-like resolved
+       config, sane validated defaults):
+       - `OCTOBOT_MCP_LOG_FILE` (default `~/.octobot-mcp/server.log`;
+         create the parent directory if missing).
+       - `OCTOBOT_MCP_LOG_LEVEL` (default `INFO`).
+       - `OCTOBOT_MCP_LOG_MAX_BYTES` (default `5_000_000`) /
+         `OCTOBOT_MCP_LOG_BACKUP_COUNT` (default `3`) for the
+         `logging.handlers.RotatingFileHandler` (NFR-16).
+       - Also attaches a `logging.StreamHandler(sys.stderr)` fixed at
+         `WARNING` (not affected by `OCTOBOT_MCP_LOG_LEVEL`), so a crashing
+         process still surfaces something to whatever the MCP client
+         captures from the subprocess.
+    2. Call `configure_logging()` from `server.py::main()`, **before**
+       `mcp.run()` — never at module import time (FR-29's own acceptance
+       criterion: importing tool modules under `pytest` must never create a
+       log file or attach a handler as a side effect; verify this
+       explicitly, e.g. a test that imports the package and asserts the
+       root logger has no handlers unless `configure_logging()` was called).
+    3. No new MCP tool is added to retrieve this file (see tool spec's
+       "Destination" subsection for why: it's already on the same local
+       filesystem as the process that launched this stdio subprocess,
+       unlike OctoBot's own remote-only logs). Instead, document the
+       resolved path: a line in `server.py`'s `INSTRUCTIONS` constant (the
+       "Tool groups"/relevant section) and a short section in `README.md`.
+    4. Tests: `configure_logging()` produces a `RotatingFileHandler` with
+       the documented default (and env-overridden) bounds; a log line
+       written after configuration actually appears in the file; the
+       import-time-no-side-effect test from step 2.
+
+    **Demo:** run the server against the live instance, make a few tool
+    calls (including one that errors, e.g. an unknown `job_id`), then read
+    `~/.octobot-mcp/server.log` and confirm structured `INFO`-level per-call
+    lines and the error's classified `error_class` are both present.
