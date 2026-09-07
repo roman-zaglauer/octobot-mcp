@@ -330,7 +330,14 @@ _LIST_TENTACLES_UNAVAILABLE: dict[str, Any] = {
         "response. Building an HTML scraper for this was deliberately "
         "rejected (see docs/adr/0006-read-model-acquisition-strategy.md's "
         "'Alternatives considered') as multiplying fragile, "
-        "OctoBot-UI-version-coupled surface for marginal value."
+        "OctoBot-UI-version-coupled surface for marginal value. This "
+        "includes evaluators specifically: a dedicated third scrape "
+        "adapter to enumerate evaluators/their activation state for "
+        "`update_evaluator_config` was also considered and rejected, same "
+        "reasoning (see docs/adr/0009-evaluator-discovery-third-tier-b-"
+        "adapter.md) -- obtain evaluator class names/state from the "
+        "OctoBot web UI's `/advanced/evaluator_config` page, OctoBot's own "
+        "tentacle documentation, or the user."
     ),
     "alternative": "get_tentacle_config",
 }

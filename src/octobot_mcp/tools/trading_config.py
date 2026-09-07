@@ -298,6 +298,24 @@ async def update_evaluator_config(
     default) is purely additive: only the evaluators named in `patch` have
     their activation state changed, every other tentacle is left untouched.
 
+    `patch`'s keys are evaluator CLASS NAMES, not display names -- e.g.
+    `"RSIMomentumEvaluator"`, `"BBMomentumEvaluator"`,
+    `"DoubleMovingAverageTrendEvaluator"`, `"MACDMomentumEvaluator"`,
+    `"SuperTrendEvaluator"` are real examples confirmed against the OctoBot
+    2.1.1 test instance's default evaluator set. There is currently no tool
+    in this server that enumerates every evaluator/its current activation
+    state (ADR-0009 considered and rejected adding one as a third Tier-B
+    scrape adapter -- see `docs/adr/0009-evaluator-discovery-third-tier-b-
+    adapter.md` for the full trade-off); `get_tentacle_config(name)` does
+    NOT expose activation state either (confirmed live: its `config` field
+    holds only that evaluator's own tunable parameters, e.g. RSI thresholds
+    -- never an enabled/disabled flag). Before calling this tool, obtain
+    evaluator names/current state from the OctoBot web UI's
+    `/advanced/evaluator_config` page directly (a human, or a browser-
+    driving agent, can read it even though this MCP server does not scrape
+    it), from OctoBot's own tentacle documentation, or by asking the user.
+
+
     Output: `{"evaluator_updated_config": <passthrough of OctoBot's own
     echoed value for this key from its success response>}` -- matches the
     route's own response shape (NFR-8), by direct analogy to
