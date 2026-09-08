@@ -127,17 +127,27 @@ connected and lists 47 tools.
   `get_available_symbols_for_collection` tool — the existing
   `get_all_symbols` tool already returns equivalent data for this purpose.
 - **Instance lifecycle** (task 18, ADR-0010 — narrow, explicit reversal of
-  this project's own "reboot" out-of-scope exclusion, scoped to unblocking
-  evaluator-config-tuning backtest validation): `restart_octobot`
+  this project's own "reboot" out-of-scope exclusion): `restart_octobot`
   (confirm-gated) triggers a full OctoBot process restart;
   `wait_for_octobot_ready` polls for the instance becoming reachable again
-  afterward. **`restart_octobot` can never be made fully safe or
-  graceful** — OctoBot's own restart mechanism is an abrupt kill-and-re-exec,
-  not a clean shutdown. `wait_for_octobot_ready`'s default
-  `timeout_seconds`/`poll_interval_seconds` (60s/2s) are **unverified
-  placeholders**, not empirically measured against a real restart — see
-  `docs/adr/0010-octobot-restart-capability.md` and each tool's own
-  docstring.
+  afterward, with real measured timing behind its defaults (60s timeout/2s
+  poll interval — two live restarts measured ~2.1s until the old process
+  goes down, ~6.3–6.7s of real outage, ~8.5–8.9s total until reachable
+  again) and a real readiness-check race bug found and fixed (an early poll
+  could catch the still-alive old process and falsely report `ready: true`
+  before anything had restarted). **`restart_octobot` can never be made
+  fully safe or graceful** — OctoBot's own restart mechanism is an abrupt
+  kill-and-re-exec, not a clean shutdown. **This capability was built to
+  unblock evaluator/strategy-composition-tuning backtest validation, and
+  live testing has since CONFIRMED it does not achieve that** — the
+  restart mechanism itself works correctly, but a `profile_id`-targeted
+  backtest still doesn't reflect strategy-composition config changes
+  (which/how-many evaluators must agree) after a restart, confirmed on two
+  separate OctoBot instances. Order-execution config (sizing, stop-loss/
+  take-profit) is unaffected and applies correctly without a restart. See
+  `docs/adr/0010-octobot-restart-capability.md`'s "Negative finding" for
+  the full account, including an open question of whether to keep this
+  capability at all now that its stated purpose doesn't hold.
 
 Any tool marked "confirm-gated" refuses to act unless called with
 `confirm=true`, returning a structured explanation instead (ADR-0003) — see
@@ -169,7 +179,7 @@ to whatever the MCP client captures from the subprocess.
 pytest
 ```
 
-370 tests, no live instance required — every test mocks the OctoBot HTTP/
+371 tests, no live instance required — every test mocks the OctoBot HTTP/
 Socket.IO layer. Live verification against a real instance was done
 per-milestone during development (see each milestone's commit message). CI
 runs this same suite on every push and pull request (see the CI badge above).
