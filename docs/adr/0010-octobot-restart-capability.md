@@ -168,6 +168,33 @@ equivalent human-triggered one; see Decision 3 for the revised conclusion.
   would make `wait_for_octobot_ready` report a false-positive "ready" for
   the very workflow this capability exists to support.
 
+**Post-shipping live verification (a later session, `SIMULATOR` profile,
+OctoBot 2.1.1 test instance — the first item above, timing, is now
+resolved; the other two remain open):**
+- **Timing, resolved**: two real restarts, both against a `SIMULATOR`
+  profile (never `LIVE`), dense-polled the whole way through. Both runs:
+  HTTP reachable until ~2.1s post-trigger (matching OctoBot's own confirmed
+  `restart_bot(delay=2)` almost exactly), then genuinely unreachable for
+  ~6.3–6.7s, reachable again at ~8.5–8.9s total. n=2, one instance/version —
+  informed, not a guaranteed bound for every deployment.
+- **A real bug found and fixed by this same testing**: `wait_for_octobot_ready`'s
+  first poll fires immediately after `restart_octobot` returns — both live
+  trials, the naive first-success-wins version of the loop returned
+  `ready: true` in ~0.05s, entirely within the ~2.1s pre-kill grace window,
+  having caught the OLD process still answering, never the actual restart.
+  This would have silently defeated the entire capability for any real
+  caller (proceeding to backtest against an unrestarted process while
+  believing it was "ready"). Fixed: `wait_for_octobot_ready` now requires
+  observing at least one genuinely failed poll before a later success
+  counts as `ready: true`. See the tool's own updated docstring
+  (`src/octobot_mcp/tools/instance_lifecycle.py`) for the full account.
+- **Still open**: whether "ready" (now correctly meaning "observed a real
+  outage, then reachable again") coincides with "the tentacle-config cache
+  is actually clear." This testing round did not run a backtest against a
+  previously-tuned evaluator config after a restart to check — only HTTP
+  reachability timing was measured. Requirements doc open question #14
+  reflects this partial resolution.
+
 ## Decision
 
 ### 1. Go, with the capability scoped narrowly to the stated workflow
@@ -441,7 +468,8 @@ Following this project's one-class-per-domain-failure convention
 | Risk | Severity | Likelihood | Mitigation |
 |---|---|---|---|
 | Abrupt kill-and-reexec with no graceful shutdown is inherent to OctoBot's own restart mechanism and cannot be made safe by this server | High | Certain (whenever the tool is used) | Confirm-gated (decision 2) with a risk-scaled reason string for `LIVE` profiles (decision 3); OctoBot's own changelog/source evidence (Context) shows restart-during-live-trading is a designed, hardened scenario with exchange-side reconciliation on boot, which narrows but does not eliminate this risk — stated plainly in the tool description as an accepted, unremovable trade-off, not engineered around, because it cannot be |
-| `wait_for_octobot_ready`'s "ready" (HTTP-reachable) may not coincide with "the tentacle-config cache is actually clear," the very fix this capability exists to validate | Medium | Medium — `[UNVERIFIED]` | Implementer must empirically verify end-to-end timing against the live instance before shipping (a real restart, safe to trigger once during implementation, unlike during this design session); document the distinction plainly in the tool's docstring regardless of the outcome |
+| `wait_for_octobot_ready`'s "ready" (HTTP-reachable after a confirmed outage) may not coincide with "the tentacle-config cache is actually clear," the very fix this capability exists to validate | Medium | Medium — `[UNVERIFIED]`, PARTIALLY narrowed: end-to-end timing IS now measured (two live restarts, ~8.5–8.9s total; see Context's "Post-shipping live verification"), but whether a backtest run immediately at "ready" actually reflects a tuned evaluator config was not tested | A future session should run a full evaluator-tune → restart → backtest cycle and confirm the result reflects the tuning; until then, `wait_for_octobot_ready`'s docstring states this gap plainly rather than implying it's closed |
+| A naive "first successful poll wins" implementation of `wait_for_octobot_ready` can report a false `ready: true` by racing OctoBot's own ~2s pre-kill grace window and hitting the OLD, not-yet-killed process — **found live, twice, and fixed** | Was High before the fix (would have silently defeated the whole capability); now Resolved | Was Certain given the confirmed ~2s scheduling delay; now N/A | Fixed: `wait_for_octobot_ready` now requires observing at least one genuinely failed poll before a later success counts as `ready: true` (`src/octobot_mcp/tools/instance_lifecycle.py`, regression test in `tests/test_tools_instance_lifecycle.py`) |
 | A backtest/data-collection job starts in the narrow window between the job-store check and the actual reboot call | Low | Low (single-client assumption, A3) | Accepted residual risk given A3; revisit if multi-instance/multi-client support is ever added (NFR-11) |
 | `/wait_reboot`'s HTML response shape/status code changes in a future OctoBot version | Low | Low | Only the HTTP status code is inspected, never the HTML body — minimal coupling surface; document the last-verified OctoBot version (2.1.1) alongside the tool, per this project's existing scrape-adapter convention |
 | Live-trading blind-spot window duration is unmeasured, so an agent confirming `restart_octobot` against a `LIVE` profile is confirming a real but unquantified risk | Medium | Medium (whenever a caller confirms restart against a `LIVE` profile) | `[UNVERIFIED]`; the `LIVE`-specific confirmation reason string (decision 3) names this gap explicitly rather than implying the risk is fully characterized; a future measurement task (trigger one real restart during a real-trading session) would let this be stated as a concrete bound instead of an open unknown |

@@ -177,10 +177,20 @@ restart mechanism is an abrupt kill-and-re-exec, not a clean shutdown -- no \
 task cancellation or explicit order handling happens first. This is \
 inherent to OctoBot itself, not a limitation this server's implementation \
 could remove. `wait_for_octobot_ready`'s default `timeout_seconds`/ \
-`poll_interval_seconds` (60s/2s) are UNVERIFIED placeholders, not \
-empirically measured against a real restart -- override them if you have \
-your own measurement, and do not assume "ready" (HTTP reachable) means the \
-tentacle-config cache this capability exists to clear is actually cleared.
+`poll_interval_seconds` (60s/2s) have real measured data behind them now \
+(two live restarts against the test instance: ~2.1s until the OLD process \
+goes down, ~6.3-6.7s of real outage, ~8.5-8.9s total until reachable again) \
+-- still only two samples on one instance/version, so treat them as \
+informed, not guaranteed, and override if your environment differs. \
+`wait_for_octobot_ready` also had a real bug, found via this live testing \
+and fixed: its first poll fires immediately, which can (and, live, twice, \
+did) land within OctoBot's own ~2s pre-kill grace window and hit the OLD \
+process, falsely reporting `ready: true` before anything actually \
+restarted. It now requires observing at least one genuinely unreachable \
+poll before a later success counts as `ready: true`. Even with that fix, \
+do not assume "ready" means the tentacle-config cache this capability \
+exists to clear is actually cleared -- that timing was NOT independently \
+verified this session (no backtest was run after a test restart).
 - Restarting fixes the SPECIFIC `_TENTACLE_CONFIG_CACHE` bug behind \
 evaluator-requirements tuning (see above), but this is NOT confirmed to be \
 a universal fix for every strategy-COMPOSITION tuning case: the same \

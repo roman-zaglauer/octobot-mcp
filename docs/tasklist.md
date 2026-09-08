@@ -350,15 +350,30 @@ global project standards.
     ADR-0010's prose directly (the spec section is the authoritative,
     implementable restatement of ADR-0010's decisions).
 
-    **Step 0 — DEFERRED by explicit user decision (not resolved this
-    round):** this step originally called for triggering one real restart
-    against the live instance to resolve open question #14 before
-    implementation. The user chose to skip live verification for now rather
-    than authorize triggering a real restart. Implement against a
-    conservative, explicitly `[UNVERIFIED]`-flagged placeholder instead (see
-    "Then implement" below) and leave open question #14 open — do not
-    silently mark it resolved. Original step 0 text, preserved for whoever
-    does eventually run it:
+    **Step 0 — initially DEFERRED by explicit user decision, later
+    COMPLETED in a follow-up live-testing round.** This step originally
+    called for triggering one real restart against the live instance to
+    resolve open question #14 before implementation. At implementation
+    time, the user chose to skip live verification rather than authorize a
+    real restart, so the tool shipped against a conservative
+    `[UNVERIFIED]`-flagged placeholder (see "Then implement" below).
+    **A later session ran this step for real**: two live restarts against
+    the `SIMULATOR`-selected "Smart DCA v4 - Baseline (Simulator)" profile
+    (never `LIVE`; state restored afterward), dense-polled throughout.
+    Findings (also in `docs/adr/0010-octobot-restart-capability.md`'s
+    "Post-shipping live verification" and
+    `src/octobot_mcp/tools/instance_lifecycle.py`'s module/function
+    docstrings): (a) timing resolved — reachable until ~2.1s post-trigger,
+    genuinely unreachable ~6.3–6.7s, reachable again at ~8.5–8.9s total
+    (n=2); (b) a real bug found and fixed — the original first-success-wins
+    `wait_for_octobot_ready` loop returned `ready: true` in ~0.05s on both
+    live trials, racing OctoBot's own confirmed ~2s pre-kill grace window
+    and catching the OLD process, never observing the actual restart; fixed
+    by requiring an observed failed poll before a later success counts as
+    ready. (c) NOT resolved: whether "ready" coincides with the
+    tentacle-config cache actually being clear — no backtest was run after
+    a test restart to check. Open question #14's cache-clear half remains
+    open. Original step 0 text, preserved for reference:
 
     <details>
     <summary>Original step 0 (not run)</summary>

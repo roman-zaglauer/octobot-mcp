@@ -238,18 +238,27 @@ continuing the same numbering:
     `update_tentacles_activation_config`'s own body this session. Developer
     must confirm before finalizing `update_evaluator_config`'s
     `deactivate_others` parameter's default and documented behavior.
-14. **End-to-end OctoBot restart timing, and whether "HTTP-reachable again"
-    coincides with "the tentacle-config cache is actually clear"** (ADR-0010) —
-    neither was safely measurable during ADR-0010's design session (would
-    have required triggering a real restart). `wait_for_octobot_ready`'s
-    default `timeout_seconds`/`poll_interval_seconds` and its choice of
-    lightweight polling route must be set from a real measurement, not
-    guessed; a developer must trigger one real restart against the live
-    instance and observe both (a) how long until the HTTP server answers
-    again, and (b) whether a subsequent backtest run against a
-    previously-tuned evaluator config actually reflects the tuning
-    immediately once "ready," or needs additional delay/confirmation before
-    that's true. See ADR-0010's own Risks table for the same open item.
+14. **End-to-end OctoBot restart timing — PARTIALLY RESOLVED; whether
+    "HTTP-reachable again" coincides with "the tentacle-config cache is
+    actually clear" remains open** (ADR-0010). Timing: resolved by live
+    testing (two real restarts, `SIMULATOR` profile, OctoBot 2.1.1 test
+    instance) — the HTTP server stayed reachable for ~2.1s post-trigger
+    (matching OctoBot's own confirmed `restart_bot(delay=2)`), was
+    genuinely unreachable for ~6.3–6.7s, then answered again at ~8.5–8.9s
+    total (n=2, one instance/version — treat as informed, not a guaranteed
+    bound for every deployment). This same testing also found and fixed a
+    real bug: `wait_for_octobot_ready`'s first poll fires immediately after
+    `restart_octobot` returns, which can — and did, both times — land
+    within OctoBot's ~2s pre-kill grace window and hit the OLD process,
+    falsely reporting `ready: true` in ~0.05s before anything had actually
+    restarted. Fixed: a success now only counts as `ready: true` once at
+    least one prior poll in the same call has genuinely failed. **Still
+    open**: whether "ready" (HTTP reachable after a confirmed outage) means
+    the tentacle-config cache is actually clear was NOT independently
+    verified — no backtest was run against a previously-tuned evaluator
+    config after a test restart to confirm the tuning is actually reflected
+    immediately once ready. See ADR-0010's Risks table for the same open
+    item.
 
 ## Traceability
 Source material: OctoBot GitHub (Drakkar-Software/OctoBot, `master` branch,

@@ -289,11 +289,43 @@ async def test_wait_for_octobot_ready_reports_success_after_transient_failures()
 async def test_wait_for_octobot_ready_treats_any_status_code_as_reachable():
     # "Ready" means only "the HTTP server answered", per this tool's own
     # docstring -- even a non-2xx response counts, since it proves the
-    # transport is back up.
+    # transport is back up. One leading connection failure is included so
+    # this also satisfies the "ready requires an observed prior outage"
+    # invariant below -- without it, this would exercise the exact
+    # first-poll-races-the-restart false positive that invariant exists to
+    # prevent, not the "non-2xx still counts" behavior this test targets.
+    call_count = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ConnectError("connection refused", request=request)
         return httpx.Response(404, text="not found")
 
     ctx = make_ctx(httpx.MockTransport(handler))
     result = await wait_for_octobot_ready(ctx, timeout_seconds=1.0, poll_interval_seconds=0.0)
     assert result["ready"] is True
-    assert result["attempts"] == 1
+    assert result["attempts"] == 2
+
+
+@pytest.mark.anyio
+async def test_wait_for_octobot_ready_does_not_report_ready_on_first_success_without_a_prior_outage():
+    # Regression test for a real bug found via live testing against the
+    # OctoBot 2.1.1 test instance: restart_octobot's route schedules the
+    # actual kill with a confirmed ~2s delay, so a poll issued immediately
+    # after triggering a restart can land within that grace window and hit
+    # the OLD, not-yet-killed process -- a false "ready" that never observed
+    # the real restart at all (confirmed live, twice: the naive first-
+    # success-wins version of this loop returned ready=True in ~0.05s both
+    # times, entirely before the real ~2.1s-8.9s outage window even began).
+    # A mock that ALWAYS succeeds, with no prior failure ever observed, must
+    # now time out honestly rather than report a false positive on its very
+    # first poll.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"version": "OctoBot 2.1.1"})
+
+    ctx = make_ctx(httpx.MockTransport(handler))
+    result = await wait_for_octobot_ready(ctx, timeout_seconds=0.05, poll_interval_seconds=0.01)
+    assert result["ready"] is False
+    assert result["attempts"] >= 1

@@ -14,16 +14,35 @@ clears it. Implemented against
 authoritative, implementable restatement of ADR-0010's decisions), not
 against the ADR's prose directly.
 
-## Step 0 deferred by explicit user decision -- `[UNVERIFIED]` defaults
+## Step 0: initially deferred, later completed in a follow-up live-testing round
 
 ADR-0010's own "Downstream artefacts" section called for triggering ONE
 real restart against the live instance before finalizing
-`wait_for_octobot_ready`'s default `timeout_seconds`/polling route. The
-user explicitly declined to authorize a live restart for this
-implementation round (see `docs/tasklist.md` item 18's "Deferred-step-0
-substitute" note). Accordingly:
-- `DEFAULT_TIMEOUT_SECONDS`/`DEFAULT_POLL_INTERVAL_SECONDS` below are
-  conservative, UNMEASURED placeholders, not empirically-derived defaults.
+`wait_for_octobot_ready`'s default `timeout_seconds`/polling route. This
+module's FIRST implementation round shipped without that (the user
+explicitly declined to authorize a live restart at the time), with
+`DEFAULT_TIMEOUT_SECONDS`/`DEFAULT_POLL_INTERVAL_SECONDS` as unmeasured
+placeholders. **A later session did run that verification** -- two real
+restarts against the live test instance (`SIMULATOR` profile selected
+first, per this project's safety discipline; state restored afterward),
+dense-polled throughout. Findings, also recorded in
+`wait_for_octobot_ready`'s own docstring and
+`docs/adr/0010-octobot-restart-capability.md`'s "Post-shipping live
+verification":
+- **Timing, now measured** (n=2, one instance/version -- informed, not a
+  universal guarantee): HTTP reachable until ~2.1s post-trigger (matching
+  OctoBot's own confirmed `restart_bot(delay=2)`), genuinely unreachable for
+  ~6.3-6.7s, reachable again at ~8.5-8.9s total.
+  `DEFAULT_TIMEOUT_SECONDS`/`DEFAULT_POLL_INTERVAL_SECONDS` below (60s/2s)
+  have real headroom above/inside those measurements now, not just a guess.
+- **A real bug found and fixed by this same testing**: the original
+  first-success-wins polling loop returned `ready: true` in ~0.05s on BOTH
+  live trials -- entirely within the ~2.1s pre-kill grace window, having
+  caught the OLD, not-yet-killed process, never observing the actual
+  restart. `wait_for_octobot_ready` now requires observing at least one
+  genuinely failed poll before a later success counts as `ready: true` --
+  see that function's own docstring for the full account and
+  `tests/test_tools_instance_lifecycle.py`'s regression test.
 - The polling route (`_POLL_ROUTE_PATH`, `GET /api/version`) was picked for
   being this project's own already-established "is OctoBot up at all"
   smoke-test route -- every prior milestone's own live-verification session
@@ -36,19 +55,21 @@ substitute" note). Accordingly:
   existing yet -- unlike `get_exchange_details` (`/api/first_exchange_details`),
   which depends on at least one exchange being configured and loaded, a
   precondition this module has no way to guarantee holds in the first few
-  seconds after a restart. It was NOT re-verified this round to "behave
-  sanely in the first seconds after a restart" (ADR-0010's own caveat) --
-  no restart was triggered to check that against, live.
-- Requirements doc open question #14 (end-to-end restart timing, and
-  whether "HTTP reachable again" coincides with "the tentacle-config cache
-  is actually clear") is deliberately left OPEN by this implementation --
-  see `wait_for_octobot_ready`'s own docstring, which states this plainly
-  rather than implying either has been verified.
+  seconds after a restart. Confirmed sane in the first seconds after a
+  restart by the live testing above (it was the exact route dense-polled
+  throughout both trials).
+- **Still open** (requirements doc open question #14, NOT resolved by this
+  round): whether "ready" (now correctly meaning "observed a real outage,
+  then reachable again") coincides with "the tentacle-config cache is
+  actually clear." No backtest was run against a previously-tuned evaluator
+  config after a test restart to confirm the tuning is actually reflected
+  immediately once ready -- see `wait_for_octobot_ready`'s own docstring,
+  which states this plainly rather than implying it has been verified.
 
-All of this module's own tests mock the HTTP transport; none exercise a
-live OctoBot instance, and no test or code path in this module (or anywhere
-in this implementation round) ever issues a real `GET
-/wait_reboot?reboot=true` against a live instance.
+This module's own tests all mock the HTTP transport (no live OctoBot
+instance is exercised by the test suite); the live verification described
+above was a separate, manual, one-off testing session against the real
+instance, not something this module's automated tests do.
 """
 
 import asyncio
@@ -65,8 +86,13 @@ from octobot_mcp.jobs import JobStore
 from octobot_mcp.tools._shared import require_confirmation, with_error_handling
 from octobot_mcp.tools.profiles import _fetch_and_parse_profiles
 
-#: `[UNVERIFIED]` placeholder (open question #14) -- see this module's
-#: docstring for why no live measurement backs these two values this round.
+#: Backed by real measurement now (two live restarts, ~8.5-8.9s end-to-end,
+#: ~6.3-6.7s outage -- see this module's docstring's "Step 0" section and
+#: `wait_for_octobot_ready`'s own docstring). n=2, one instance/version --
+#: informed defaults, not a universal guarantee; override if your
+#: environment differs. Open question #14's OTHER half (whether "ready"
+#: coincides with the tentacle-config cache actually being clear) remains
+#: unresolved regardless of these two values.
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 
@@ -314,33 +340,63 @@ async def wait_for_octobot_ready(
     fabricated guess" ethic), matching every other timeout-bounded loop in
     this project.
 
-    **"Ready" means ONLY "the HTTP server answered a request again" --
-    nothing more.** `[UNVERIFIED]`, open question #14, NOT resolved by this
-    implementation (a live restart was explicitly not authorized this
-    round -- see this module's docstring): whether that moment coincides
-    with "OctoBot's tentacle-config cache
-    (`_TENTACLE_CONFIG_CACHE`, ADR-0010's root-cause analysis) is actually
-    clear" -- the very fix this capability exists to let you validate via
-    backtest -- is NOT established. Do not assume a `ready: true` result
-    means a subsequent backtest will reflect a just-tuned evaluator config;
-    it may need additional, unquantified time beyond "HTTP reachable."
+    **Correctness fix (resolving part of open question #14, live-verified
+    against the test instance): a `ready: true` result now REQUIRES having
+    observed at least one genuinely unreachable poll first.** An earlier
+    version of this tool returned `ready: true` after its very first poll
+    succeeded -- but `restart_octobot`'s own route schedules OctoBot's kill
+    with a confirmed ~2-second delay (`models.restart_bot(delay=2)`,
+    ADR-0010's Context), so a poll issued immediately after
+    `restart_octobot` returns will almost always land WITHIN that grace
+    window and hit the OLD, not-yet-killed process -- a false positive that
+    completely defeats this tool's purpose. Confirmed live, twice, against
+    the OctoBot 2.1.1 test instance: the HTTP server stayed reachable until
+    ~2.1s post-trigger (matching the confirmed 2s delay almost exactly),
+    then was genuinely unreachable for ~6.3-6.7s, before answering again at
+    ~8.5-8.9s total. A naive first-success-wins loop reported `ready: true`
+    in ~0.05s both times -- entirely within the pre-kill grace window, never
+    having observed the real restart at all. This loop now tracks whether
+    it has seen a failed poll; a success only counts as `ready: true` once
+    at least one prior poll in this same call has failed, so `ready: true`
+    now means "the server went down and came back," not just "answered."
 
-    `DEFAULT_TIMEOUT_SECONDS`/`DEFAULT_POLL_INTERVAL_SECONDS` (60s/2s) are
-    conservative, UNMEASURED placeholders -- no real restart's end-to-end
-    timing backs them (open question #14). Override both per-call if you
-    have your own measurement.
+    **"Ready" (even with the fix above) still means ONLY "the HTTP server
+    answered a request again after a confirmed outage" -- nothing more.**
+    `[UNVERIFIED]`, open question #14, NOT fully resolved by this session's
+    testing: whether that moment coincides with "OctoBot's tentacle-config
+    cache (`_TENTACLE_CONFIG_CACHE`, ADR-0010's root-cause analysis) is
+    actually clear" -- the very fix this capability exists to let you
+    validate via backtest -- was NOT independently confirmed this session
+    (no backtest was run after the test restarts; only the HTTP-reachability
+    timing was measured). Do not assume a `ready: true` result means a
+    subsequent backtest will reflect a just-tuned evaluator config; it may
+    need additional, unquantified time beyond "HTTP reachable."
+
+    `DEFAULT_TIMEOUT_SECONDS`/`DEFAULT_POLL_INTERVAL_SECONDS` (60s/2s):
+    the 60s timeout has real headroom above the ~8.5-8.9s measured
+    end-to-end restart time above (measured twice, one instance, one
+    OctoBot version -- some margin is appropriate, not treated as a tight
+    bound); the 2s poll interval reliably samples within the ~6.3-6.7s
+    measured outage window. Still treat both as informed-but-limited
+    defaults (n=2, single instance/version), not a guaranteed bound for
+    every OctoBot deployment -- override both per-call if your own
+    environment differs materially.
 
     Not confirm-gated (a read-only poll). Returns `{"ready": true|false,
-    "elapsed_seconds": float, "attempts": int}` -- both fields reflect this
+    "elapsed_seconds": float, "attempts": int}` -- all fields reflect this
     loop's REAL timing/attempt count, never fabricated.
     """
     client = get_client(ctx)
     start = time.monotonic()
     attempts = 0
+    observed_unreachable = False
     while True:
         attempts += 1
-        if await _is_octobot_reachable(client):
+        reachable = await _is_octobot_reachable(client)
+        if reachable and observed_unreachable:
             return {"ready": True, "elapsed_seconds": time.monotonic() - start, "attempts": attempts}
+        if not reachable:
+            observed_unreachable = True
         elapsed = time.monotonic() - start
         if elapsed >= timeout_seconds:
             return {"ready": False, "elapsed_seconds": elapsed, "attempts": attempts}
