@@ -332,3 +332,115 @@ global project standards.
     calls (including one that errors, e.g. an unknown `job_id`), then read
     `~/.octobot-mcp/server.log` and confirm structured `INFO`-level per-call
     lines and the error's classified `error_class` are both present.
+
+18. **`restart_octobot`/`wait_for_octobot_ready` — instance-lifecycle
+    addendum, closing an evaluator-config-tuning validation gap (ADR-0010).**
+    Not part of the original 14 milestones or any earlier backlog-gap
+    addendum — a narrow, user-explicitly-authorized reversal of this
+    project's own "reboot" out-of-scope exclusion (see requirements doc's
+    amended "Out of scope" note). Exists because OctoBot caches a strategy's
+    required-evaluators descriptor (`_TENTACLE_CONFIG_CACHE`,
+    `web_interface/models/configuration.py`) and never invalidates it on
+    `select_profile`/`update_tentacle_config`/`update_evaluator_config`/
+    backtest start — only a full process restart clears it, so
+    evaluator-level tuning currently can't be validated via backtest through
+    this server at all. Traces to FR-30/FR-31/NFR-17 (requirements doc) and
+    the tool spec's new "Instance lifecycle" section, which fully specifies
+    both tools' contracts — implement against that section, not against
+    ADR-0010's prose directly (the spec section is the authoritative,
+    implementable restatement of ADR-0010's decisions).
+
+    **Step 0 — DEFERRED by explicit user decision (not resolved this
+    round):** this step originally called for triggering one real restart
+    against the live instance to resolve open question #14 before
+    implementation. The user chose to skip live verification for now rather
+    than authorize triggering a real restart. Implement against a
+    conservative, explicitly `[UNVERIFIED]`-flagged placeholder instead (see
+    "Then implement" below) and leave open question #14 open — do not
+    silently mark it resolved. Original step 0 text, preserved for whoever
+    does eventually run it:
+
+    <details>
+    <summary>Original step 0 (not run)</summary>
+
+    Trigger ONE real restart
+    against the live instance (`http://192.168.178.100:5001`) and observe:
+    (a) how long from `GET /wait_reboot?reboot=true`'s response until the
+    HTTP server answers a plain `GET` again — this sets
+    `wait_for_octobot_ready`'s default `timeout_seconds`; (b) whether a
+    backtest run against a previously-tuned evaluator config, executed
+    immediately once "ready," actually reflects the tuning, or whether some
+    additional delay/confirmation step is needed beyond "HTTP reachable" —
+    document whichever is true plainly in `wait_for_octobot_ready`'s
+    docstring, per the tool spec's explicit warning not to overclaim this.
+    Also confirm which existing lightweight `GET` route is safe/sane to poll
+    with in the first seconds after a restart (doesn't itself hang or
+    error oddly during OctoBot's own startup sequence).
+    </details>
+
+    **Deferred-step-0 substitute (what to actually do this round):** pick a
+    conservative default `timeout_seconds` (e.g. 60s) and `poll_interval_seconds`
+    (e.g. 2s) without live measurement, and a reasonable lightweight existing
+    `GET` route to poll (e.g. an already-implemented, cheap read route such
+    as `get_exchange_details` or similar — developer's call, document the
+    choice and why). Mark BOTH the docstring and the requirements doc's open
+    question #14 as still open/unverified — do not claim these defaults were
+    measured. Do NOT trigger any real restart against the live instance
+    during this implementation round; all tests must mock the HTTP layer.
+
+    **Then implement, in this order:**
+    1. New error class `RestartFailedError` in `octobot_mcp.errors` (before
+       the module below that raises it, per this project's established
+       ordering convention) — raised only when the restart HTTP call itself
+       fails in a way indicating the restart was never scheduled (non-200,
+       or an unexpected connection failure), never for the `confirm`/
+       active-job refusals (those are structured non-exception returns, same
+       convention as every other gated tool via `require_confirmation`).
+    2. New module `octobot_mcp.tools.instance_lifecycle` (or similar —
+       developer's call on the exact name, consistent with this project's
+       existing per-domain module convention): `restart_octobot` (check
+       order: `confirm` → `JobStore` active-job check across both
+       `backtest_execution_lock`/`data_collection_execution_lock` → the one
+       live call → risk-scaled refusal reason string sourced from the
+       existing `list_profiles`/`get_profile` Tier-B scrape, per the tool
+       spec) and `wait_for_octobot_ready` (bounded poll/backoff loop, using
+       step 0's resolved default timeout and polling route).
+    3. Register both tools (`register_all`), update `README.md`'s tool
+       count/list, and add both to `server.py`'s `INSTRUCTIONS` constant
+       (a new bullet in "Tool groups" plus, given the never-fully-safe
+       nature of this capability per ADR-0010, a "Known OctoBot-side
+       quirks" bullet stating the abrupt-kill/no-graceful-shutdown fact
+       plainly, not softened).
+    4. Tests: `confirm=false`/`true` refusal-vs-proceed for both a
+       `SIMULATOR`-selected and `LIVE`-selected profile (asserting the
+       reason string differs, not just that both refuse); an active-job
+       refusal for each of `backtest`/`data_collection`; a non-200 restart
+       response raising `RestartFailedError`; `wait_for_octobot_ready`
+       timing out honestly against a mocked always-unreachable transport
+       within its configured `timeout_seconds` (NFR-17); a successful
+       `wait_for_octobot_ready` against a mocked transport that starts
+       failing then starts succeeding, asserting `attempts`/`elapsed_seconds`
+       are populated honestly, not fabricated.
+
+    **Demo (this round, live-restart step deferred by user decision — see
+    above): unit-test-only**, against mocked transports: `confirm=false`/
+    `true` × `SIMULATOR`/`LIVE` refusal reason strings differing correctly;
+    `restart_octobot` refusing outright while a mocked active job exists;
+    a mocked non-200 restart response raising `RestartFailedError`;
+    `wait_for_octobot_ready` reporting `ready: false` on a deliberately short
+    `timeout_seconds` against a mock that never succeeds, and `ready: true`
+    against a mock that starts failing then succeeds. **The real, live,
+    end-to-end demo below remains outstanding** until someone explicitly
+    authorizes triggering a real restart against a live instance:
+
+    On a `SIMULATOR`-selected profile with no active job: tune an
+    evaluator's config via `update_evaluator_config`, call
+    `restart_octobot(confirm=true)`, poll `wait_for_octobot_ready` until
+    `ready: true`, re-confirm the selected profile via `get_profile`, then
+    run `start_backtest` and confirm the result actually reflects the tuned
+    evaluator config — the end-to-end flow this addendum exists to enable.
+    Also demo: `restart_octobot` refusing without `confirm=true` (showing
+    the risk-scaled reason string differs for a `LIVE`-selected profile);
+    `restart_octobot` refusing outright while a backtest job is running;
+    `wait_for_octobot_ready` reporting `ready: false` on a deliberately short
+    `timeout_seconds` before the instance has actually come back up.

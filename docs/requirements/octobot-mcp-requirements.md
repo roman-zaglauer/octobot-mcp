@@ -75,6 +75,8 @@ tentacles/logs where a real endpoint exists.
 | FR-27 | The server SHALL provide read tools for the exchange-scoped symbol list and available timeframe list a data collection run may target. | SHOULD | Given a valid `exchange`, `get_available_symbols_for_collection`/`get_available_timeframes_for_collection` each return the same list OctoBot's own `/data_collector` `symbol_list`/`available_timeframes_list` JSON actions return, with no scraping involved. This requirement's symbols half MAY be satisfied by reusing the existing `get_all_symbols` tool instead of adding a new one, if a developer confirms it returns equivalent data for the same exchange (see tool spec's developer note); the timeframes half has no existing equivalent and MUST be a new tool regardless. |
 | FR-28 | The server SHALL provide a tool to update evaluator activation configuration for the current profile, matching the "trading config" domain's existing `update_trading_config` tool's own pattern (same `POST /config` route, same underlying model function, a different top-level request-body key). | SHOULD | Given a valid `patch` (a map of evaluator class name → enabled boolean), when `update_evaluator_config` is called, then OctoBot's stored evaluator-activation config reflects the patch (via `POST /config`'s `EVALUATOR_CONFIG_KEY` branch) and the tool returns the updated fields; not confirm-gated (mutates which evaluators are active, does not destroy data or expose credentials), by the same ADR-0003 reasoning already applied to `update_trading_config`. |
 | FR-29 | The server SHALL actually emit its own structured per-call/per-job-transition log lines (already specified in the tool spec's "Observability" section) to a durable, discoverable destination — closing a gap where those log calls exist in code but were never wired to any configured `logging` handler, so they were silently dropped. | MUST | On process startup, `main()` configures a rotating file handler (bounded size, per NFR-16) writing to a documented, overridable path, plus a stderr handler for `WARNING`+, before `mcp.run()` is called. After any tool call, the corresponding structured log line (per the tool spec's existing format) is present in that file. Import-time module loading (e.g. under `pytest`) never attaches a handler or creates a log file as a side effect — only `main()` does. |
+| FR-30 | The server SHALL provide a tool to trigger a full OctoBot process restart, scoped to unblocking evaluator-config-tuning backtest validation (ADR-0010) — a narrow, explicit reversal of this doc's own "Out of scope" reboot exclusion, for exactly this one capability. | SHOULD | Given `confirm=true`, when `restart_octobot` is called, then it (1) refuses if this server's own `JobStore` shows an active backtest/data-collection job (naming the job(s)), (2) otherwise issues `GET /wait_reboot?reboot=true` and returns `{"restart_triggered": true, "message": ...}` on a 200 response, or raises `RestartFailedError` otherwise. Without `confirm=true`, it refuses via the shared `require_confirmation` helper (ADR-0003) with a reason string that is more detailed/risk-scaled when the currently-selected profile's `profile_type` is `LIVE` (per ADR-0010 Decision 3) than when it is `SIMULATOR` or inconclusive. |
+| FR-31 | The server SHALL provide a tool to poll for OctoBot's HTTP server becoming reachable again after a restart, honestly reporting a bounded timeout rather than blocking indefinitely or fabricating success (ADR-0010 Decision 5). | SHOULD | Given a bounded `timeout_seconds`/`poll_interval_seconds`, `wait_for_octobot_ready` returns `{"ready": true, "elapsed_seconds", "attempts"}` once a lightweight read route responds, or `{"ready": false, "elapsed_seconds", "attempts"}` on timeout — never raises for a timeout, and never claims the instance is "ready" for more than "the HTTP server answered" (see open question #14's cache-clear-timing caveat). |
 
 ## Non-functional requirements (ASRs)
 
@@ -96,6 +98,7 @@ tentacles/logs where a real endpoint exists.
 | NFR-14 | Reuse / consistency | Data-collection job progress/ETA SHALL be computed by the same generic `octobot_mcp.eta` algorithm already used for backtest jobs, with no data-collection-specific ETA logic added (ADR-0007). | 0 new branches/functions in `octobot_mcp.eta` attributable to data-collection jobs; the only new code is the nested-step → flat-percent conversion, which lives in the data-collection watcher, not the ETA module. | Code review at implementation time. |
 | NFR-15 | Concurrency correctness | The server SHALL serialize its own `start_data_collection` submissions via a lock independent of `backtest_execution_lock` (ADR-0007), reflecting OctoBot's own two independent one-at-a-time constraints. | A concurrent `start_backtest` + `start_data_collection` pair does not block on each other's lock; two concurrent `start_data_collection` calls do serialize via `data_collection_execution_lock`. | Unit test asserting both locks are acquired/released independently. |
 | NFR-16 | Log volume bound | The server's own log file SHALL NOT grow unbounded over a long-lived process, mirroring NFR-9's job-store bound but for disk instead of memory. | Rotating file handler with a fixed `maxBytes`/`backupCount` (documented, overridable via env vars, sane defaults e.g. 5MB × 3 backups). | Unit test asserting the configured handler is a `RotatingFileHandler` with the expected bounds; code review of the one definition site. |
+| NFR-17 | Timeout policy (restart readiness) | `wait_for_octobot_ready` SHALL NOT block past its own bounded timeout, mirroring NFR-5's outbound-call timeout policy but for a multi-attempt polling loop instead of one HTTP call. | Default `timeout_seconds`/`poll_interval_seconds` documented and overridable per-call; the loop returns `{"ready": false, ...}` at the deadline rather than raising or blocking further. | Unit test with a mocked always-unreachable transport asserting the loop returns within the configured timeout, not indefinitely. |
 
 ## Data requirements
 - Profile identity: OctoBot's `profile_id` is the sole stable identifier used
@@ -118,7 +121,12 @@ tentacles/logs where a real endpoint exists.
 - MCP Resources (only Tools are exposed in v1 — a deliberate simplicity
   choice, revisit if a read-heavy "dashboard" use case emerges).
 - Any UI-plumbing route explicitly excluded by the user (about/terms/
-  robots.txt/static media/reboot/onboarding/community/webhook/feedback).
+  robots.txt/static media/reboot/onboarding/community/webhook/feedback) —
+  **amended by ADR-0010**: the general "reboot" exclusion still holds, but
+  the user explicitly authorized one narrow capability inside it
+  (`restart_octobot`/`wait_for_octobot_ready`, FR-30/FR-31) to unblock
+  evaluator-config-tuning backtest validation. This is a recorded, narrow
+  reversal, not a deletion of the broader exclusion.
 
 ## Open questions (flagged, not guessed)
 1. **Exact rendered DOM/JSON shape of `/profiles_selector`** — verified
@@ -228,6 +236,18 @@ continuing the same numbering:
     `update_tentacles_activation_config`'s own body this session. Developer
     must confirm before finalizing `update_evaluator_config`'s
     `deactivate_others` parameter's default and documented behavior.
+14. **End-to-end OctoBot restart timing, and whether "HTTP-reachable again"
+    coincides with "the tentacle-config cache is actually clear"** (ADR-0010) —
+    neither was safely measurable during ADR-0010's design session (would
+    have required triggering a real restart). `wait_for_octobot_ready`'s
+    default `timeout_seconds`/`poll_interval_seconds` and its choice of
+    lightweight polling route must be set from a real measurement, not
+    guessed; a developer must trigger one real restart against the live
+    instance and observe both (a) how long until the HTTP server answers
+    again, and (b) whether a subsequent backtest run against a
+    previously-tuned evaluator config actually reflects the tuning
+    immediately once "ready," or needs additional delay/confirmation before
+    that's true. See ADR-0010's own Risks table for the same open item.
 
 ## Traceability
 Source material: OctoBot GitHub (Drakkar-Software/OctoBot, `master` branch,

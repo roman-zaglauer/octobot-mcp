@@ -275,6 +275,26 @@ FR-28) adds one more:
   tell which tool's write was rejected. Not confirm-gated (ADR-0003):
   mutates which evaluators are active, does not destroy data, expose
   credentials, or enable live trading.
+
+Task 18 (docs/tasklist.md item 18, ADR-0010, FR-30/FR-31) adds one more.
+Defined here, before `octobot_mcp.tools.instance_lifecycle` (the one module
+that raises it), per this project's established ordering convention:
+- `RestartFailedError` -- `restart_octobot` failed to actually schedule a
+  restart. Per the tool spec's "Instance lifecycle" section (the
+  authoritative contract this tool implements against, not ADR-0010's prose
+  directly), this is raised for ANY outcome of the one live `GET
+  /wait_reboot?reboot=true` call other than a clean HTTP 200 -- a non-200
+  response, a connection-level failure, or a timeout -- never the generic
+  `OctoBotClientError`/`OctoBotServerError`/`OctoBotConnectionError`/
+  `OctoBotTimeoutError` classification `request_json` would otherwise apply,
+  since this route's own success/failure semantics (a 200 means "OctoBot
+  rendered the wait page and scheduled the kill," confirmed against
+  `Drakkar-Software/OctoBot`'s `reboot.py` source, ADR-0010 Context) don't
+  map onto that generic classification the same way a JSON API route's
+  would. Never raised for the `confirm`/active-job refusals -- those are
+  structured non-exception returns (`require_confirmation`/ADR-0003, and a
+  plain dict for the job-store check respectively), the same convention as
+  every other gated tool.
 """
 
 from __future__ import annotations
@@ -674,4 +694,26 @@ class EvaluatorConfigUpdateRejectedError(OctoBotAPIError):
     credentials, or enable live trading. See
     `octobot_mcp.tools.trading_config.update_evaluator_config`'s docstring
     for the full verified request/response shape.
+    """
+
+
+class RestartFailedError(OctoBotAPIError):
+    """`restart_octobot` failed to actually schedule a restart (task 18, ADR-0010).
+
+    Raised only once the caller has already confirmed (`confirm=true`) and
+    no active `backtest`/`data_collection` job blocked the call -- the
+    `confirm`/active-job refusals are both structured non-exception returns
+    (`octobot_mcp.tools._shared.require_confirmation` for the former, a
+    plain dict naming the job(s) for the latter), never this exception. Per
+    the tool spec's "Instance lifecycle" section, ANY outcome of the one
+    live `GET /wait_reboot?reboot=true` call other than a clean HTTP 200 is
+    classified as this one error -- a non-200 response, a connection-level
+    failure, or a timeout -- rather than the generic
+    `OctoBotClientError`/`OctoBotServerError`/`OctoBotConnectionError`/
+    `OctoBotTimeoutError` classification `octobot_mcp.client.request_json`
+    would otherwise apply, so a caller has one unambiguous "the restart
+    itself was never triggered" signal instead of four different generic
+    connectivity exceptions to reason about for this one route. See
+    `octobot_mcp.tools.instance_lifecycle.restart_octobot`'s docstring for
+    the full verified request/response shape.
     """

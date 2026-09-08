@@ -70,6 +70,13 @@ real log archive. `list_tentacles`/`get_logs` are honest stubs -- OctoBot \
 has no JSON API for either -- so they always return \
 `{"available": false, "reason": ..., "alternative": ...}` naming a real \
 alternative tool, instead of failing or guessing at a scrape.
+- Instance lifecycle: `restart_octobot` (confirm-gated) triggers a full \
+OctoBot process restart -- narrowly scoped to unblocking evaluator-config- \
+tuning backtest validation (OctoBot caches a strategy's required-evaluators \
+descriptor and only clears it on a full restart); `wait_for_octobot_ready` \
+polls for the instance becoming reachable again afterward, never blocking \
+past its own timeout and never claiming more than "the HTTP server \
+answered" (see Known OctoBot-side quirks below).
 
 ## The async job pattern (backtesting & comparison)
 
@@ -155,17 +162,31 @@ strategies, even though they share the same underlying activation-config \
 mechanism. Leave it at its default `False` (purely additive) unless you \
 specifically want `patch` to become the exhaustive enabled-evaluator set \
 for this profile.
+- `restart_octobot` can NEVER be made fully safe or graceful: OctoBot's own \
+restart mechanism is an abrupt kill-and-re-exec, not a clean shutdown -- no \
+task cancellation or explicit order handling happens first. This is \
+inherent to OctoBot itself, not a limitation this server's implementation \
+could remove. `wait_for_octobot_ready`'s default `timeout_seconds`/ \
+`poll_interval_seconds` (60s/2s) are UNVERIFIED placeholders, not \
+empirically measured against a real restart -- override them if you have \
+your own measurement, and do not assume "ready" (HTTP reachable) means the \
+tentacle-config cache this capability exists to clear is actually cleared.
 
 ## Safety
 
-Any tool that destroys data, writes exchange credentials, or enables live/ \
-real-money trading requires an explicit `confirm=true` argument. Omitting \
+Any tool that destroys data, writes exchange credentials, enables live/ \
+real-money trading, or disrupts the whole running instance (`restart_octobot`) \
+requires an explicit `confirm=true` argument. Omitting \
 it (or passing `confirm=false`) performs NO action and returns a normal \
 (non-error) structured refusal explaining why and how to proceed -- read \
 that refusal before blindly retrying with `confirm=true`. Routine trading \
 actions (`cancel_order`, `close_position`) are deliberately NOT \
 confirm-gated even though they have real effects, since they're expected, \
-everyday operations for a trading bot, not rare/catastrophic mistakes.\
+everyday operations for a trading bot, not rare/catastrophic mistakes. \
+`restart_octobot`'s refusal reason string is more detailed when the \
+currently selected profile is LIVE (or its type is inconclusive) than when \
+it is SIMULATOR -- read it either way; `confirm=true` is the SAME gate in \
+both cases, never a hard block.\
 """
 
 # The MCP SDK's own `MCPServer.__init__` unconditionally calls its internal

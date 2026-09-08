@@ -662,6 +662,62 @@ would corrupt the protocol stream), so `main()` configures, once, before
   `update_exchange_credentials` call regardless of outcome, is logged at
   the structured-log level described above, redacted per NFR-6.
 
+## Instance lifecycle (task 18, FR-30/FR-31, ADR-0010)
+
+Narrow, explicit reversal of this doc's "Out of scope" reboot exclusion —
+exactly two tools, scoped to unblocking evaluator-config-tuning backtest
+validation (see ADR-0010 for the full trade-off analysis; this section
+states the resulting contracts only).
+
+#### `restart_octobot(confirm=false)`
+Maps to `GET /wait_reboot?reboot=true` (HTML route, no body parsing —
+OctoBot renders a wait page then kills/re-execs the process ~2s later).
+Check order (cheapest/safest first, ADR-0010 Decision 4): (1) `confirm`
+flag; (2) `JobStore` — refuses outright, structured non-exception return,
+if any `backtest`/`data_collection` job is `queued`/`running`, naming the
+job(s); (3) the one live call.
+
+Gating (ADR-0010 Decision 2/3): requires `confirm=true` via the shared
+`require_confirmation` helper, same mechanism regardless of the selected
+profile's `profile_type` — but the refusal-without-`confirm` reason string
+is more detailed/risk-scaled when `profile_type` is `LIVE` (or the
+profile-type check itself is inconclusive — fail toward the more detailed
+message, not silently allow) than when it is `SIMULATOR`. **Not** a hard,
+`confirm`-bypassable-only-for-SIMULATOR block — see ADR-0010 for why an
+earlier draft's hard refusal didn't hold up.
+
+Output on success (HTTP 200): `{"restart_triggered": true, "message":
+"OctoBot restart scheduled (~2s delay); the server will be briefly
+unreachable. Call wait_for_octobot_ready() next, then re-confirm the
+active profile via get_profile()/list_profiles() before starting a
+backtest."}`. Any other outcome raises `RestartFailedError` (non-200
+response, or a connection failure that isn't the expected
+post-render-then-disconnect pattern) — never a false "triggered" result.
+
+#### `wait_for_octobot_ready(timeout_seconds=60, poll_interval_seconds=2)`
+A bounded retry-with-backoff loop against a lightweight existing read route
+(`[UNVERIFIED]`, open question #14 — implementer picks and documents the
+cheapest confirmed-working `GET`, verifying it behaves sanely in the first
+seconds after a restart, not just once steady-state). Never blocks past
+`timeout_seconds`. Returns `{"ready": true|false, "elapsed_seconds": float,
+"attempts": int}` — a timeout is a normal, honest result, never an
+exception, matching this project's NFR-3 "honest `null`/`false` over a
+fabricated guess" ethic. **"Ready" means only "the HTTP server answered a
+request again"** — `[UNVERIFIED]` (open question #14) whether that
+coincides with "the evaluator-config cache this capability exists to clear
+is actually clear." State this plainly in the tool's own docstring; do not
+imply a stronger guarantee.
+
+Not confirm-gated (a read-only poll). Two separate tools, not one blocking
+call and not a `JobStore` job — see ADR-0010 Decision 5 for why (no live
+socket survives the outage to watch through; a binary reachable/not-yet
+signal shouldn't be dressed up as a fabricated graduated progress/ETA).
+
+No bundled workflow tool exists for the full `select_profile` →
+`restart_octobot` → `wait_for_octobot_ready` → re-confirm via
+`get_profile`/`list_profiles` → `start_backtest` flow — left as composable
+primitives (ADR-0010 Decision 6).
+
 ## Open questions
 See requirements doc's "Open questions" section (1–6) — restated here as
 blocking implementation tasks for the specific tools they affect:
@@ -678,10 +734,22 @@ exact validation text (Q10), and whether a mid-collection failure has any
 distinguishable status signal (Q11) — all blocking implementation tasks for
 the new tasklist item, not guesses to implement against.
 
+`update_evaluator_config` open questions (requirements doc 12–13, resolved
+before that tool shipped): `EVALUATOR_CONFIG_KEY`'s literal value (Q12) and
+`deactivate_others`'s semantics (Q13).
+
+Instance-lifecycle open question (requirements doc 14, ADR-0010, blocking
+for task 18): end-to-end restart timing and whether "HTTP-reachable again"
+coincides with "the tentacle-config cache is actually clear" (Q14) — a
+developer must trigger one real restart against the live instance to
+resolve this before finalizing `wait_for_octobot_ready`'s defaults/polling
+route.
+
 ## Hand-off
 - Traced requirements: FR-1..FR-20, NFR-1..NFR-12 (requirements doc); the
   historical-data-collection addendum additionally traces to FR-22..FR-27,
-  NFR-13..NFR-15.
+  NFR-13..NFR-15; the instance-lifecycle addendum (ADR-0010) additionally
+  traces to FR-30..FR-31, NFR-17.
 - Implementer: `developer` agent, sequenced per `docs/tasklist.md`.
 - Test coverage expectations: every ETA branch (unit, synthetic sequences),
   every confirm-gated tool (unit, with/without flag), the watcher's lock

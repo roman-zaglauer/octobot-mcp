@@ -44,14 +44,19 @@ tool exists (FR-27's own contingency: confirmed live this session that
 Task 16 (item 16, FR-28, a genuinely new-scope addendum closing an
 evaluator-CRUD gap) adds `update_evaluator_config` (not confirm-gated, same
 `POST /config` route and reasoning as `update_trading_config`, a sibling
-`EVALUATOR_CONFIG_KEY` branch).
+`EVALUATOR_CONFIG_KEY` branch). Task 18 (item 18, ADR-0010, FR-30/FR-31, a
+genuinely new-scope addendum narrowly reversing this project's own "reboot"
+out-of-scope exclusion) adds `restart_octobot` (**confirm-gated**, ADR-0003 --
+the first tool in this project whose safety cannot be fully engineered, only
+scoped) and `wait_for_octobot_ready` (not confirm-gated, a read-only poll).
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
 `test_tools_portfolio.py`/`test_tools_exchanges.py`/`test_tools_profiles.py`/
 `test_tools_profiles_gated.py`/`test_tools_jobs.py`/`test_tools_backtesting.py`/
 `test_tools_tentacles.py`/`test_tools_trading_config.py`/
-`test_tools_portfolio_trading_actions.py`/`test_tools_data_collection.py`
+`test_tools_portfolio_trading_actions.py`/`test_tools_data_collection.py`/
+`test_tools_instance_lifecycle.py`
 for per-tool behavior and `test_server_tools_integration.py` for an
 end-to-end call through this same `mcp` wiring.
 
@@ -67,7 +72,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_TASK_16_TOOL_NAMES = {
+EXPECTED_TASK_18_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -112,6 +117,8 @@ EXPECTED_TASK_16_TOOL_NAMES = {
     "delete_data_file",
     "import_data_file",
     "get_available_timeframes_for_collection",
+    "restart_octobot",
+    "wait_for_octobot_ready",
 }
 
 
@@ -128,9 +135,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_task_16_tools(client: Client):
+async def test_server_lists_the_task_18_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_TASK_16_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_TASK_18_TOOL_NAMES
 
 
 @pytest.mark.anyio

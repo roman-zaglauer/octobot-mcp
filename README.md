@@ -87,7 +87,7 @@ claude mcp add octobot --env OCTOBOT_BASE_URL=http://192.168.178.100:5001 -- /ab
 ```
 
 Then run `/mcp` inside a Claude Code session to confirm `octobot` is
-connected and lists 44 tools.
+connected and lists 46 tools.
 
 ## Available tools
 
@@ -118,12 +118,24 @@ connected and lists 44 tools.
   `get_available_timeframes_for_collection`. There is no separate
   `get_available_symbols_for_collection` tool — the existing
   `get_all_symbols` tool already returns equivalent data for this purpose.
+- **Instance lifecycle** (task 18, ADR-0010 — narrow, explicit reversal of
+  this project's own "reboot" out-of-scope exclusion, scoped to unblocking
+  evaluator-config-tuning backtest validation): `restart_octobot`
+  (confirm-gated) triggers a full OctoBot process restart;
+  `wait_for_octobot_ready` polls for the instance becoming reachable again
+  afterward. **`restart_octobot` can never be made fully safe or
+  graceful** — OctoBot's own restart mechanism is an abrupt kill-and-re-exec,
+  not a clean shutdown. `wait_for_octobot_ready`'s default
+  `timeout_seconds`/`poll_interval_seconds` (60s/2s) are **unverified
+  placeholders**, not empirically measured against a real restart — see
+  `docs/adr/0010-octobot-restart-capability.md` and each tool's own
+  docstring.
 
 Any tool marked "confirm-gated" refuses to act unless called with
 `confirm=true`, returning a structured explanation instead (ADR-0003) — see
 `mcp.instructions`' "Safety" section for the full rationale. `delete_data_file`
 is confirm-gated alongside `delete_profile`/`convert_profile_to_live`/the
-`clear_*_history` tools/`update_exchange_credentials`.
+`clear_*_history` tools/`update_exchange_credentials`/`restart_octobot`.
 
 ## Logging
 
