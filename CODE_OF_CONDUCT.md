@@ -62,9 +62,8 @@ an appointed representative at an online or offline event.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at:
 
-TODO: add a maintainer contact here (e.g. a project email address or a
-designated GitHub handle to open a private security advisory / direct
-message).
+**@roman-zaglauer** on GitHub — open an issue for non-sensitive matters, or
+send a direct message for anything you'd rather keep private.
 
 All complaints will be reviewed and investigated promptly and fairly.
 
