@@ -1,10 +1,8 @@
 # OctoBot MCP Server
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/roman-zaglauer/octobot-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/roman-zaglauer/octobot-mcp/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-
-<!-- TODO: replace OWNER/REPO in the CI badge URL above with this repo's real GitHub org/name once it has a remote. -->
 
 An MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) server
 that wraps a single [OctoBot](https://github.com/Drakkar-Software/OctoBot)
