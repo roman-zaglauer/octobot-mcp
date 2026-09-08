@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-08
+
+### Fixed
+- `convert_profile_to_live`'s safety messaging overstated its effect: its
+  docstring and confirm-gating reason string previously claimed the call
+  could cause "real orders \[to\] be placed against a real exchange
+  account." Tracing the tool's underlying OctoBot calls
+  (`convert_to_live_profile`/`select_profile`) confirmed they only relabel
+  `profile.profile_type` and select the profile — neither touches
+  `config.trader.enabled`, the separate flag OctoBot's own
+  `is_real_trading()` actually checks. This is a documentation/safety-
+  messaging correction only, not a functional or behavioral change: the
+  tool's HTTP calls, inputs, and output shape are unchanged, and it
+  remains confirm-gated (it still persistently relabels and selects the
+  profile, and could otherwise mislead a caller into believing real
+  trading is now active when it is not). Corrects the tool's docstring,
+  confirm-gating message, `server.py`'s INSTRUCTIONS, the requirements
+  doc (resolving open question #5), the tool spec, and ADR-0003's
+  rationale accordingly ([0bd0c17](https://github.com/roman-zaglauer/octobot-mcp/commit/0bd0c17f89cf3159d6214965c02b7d784b7cb8d7)).
+
 ## [1.0.0] - 2026-09-08
 
 First public release. All 14 original tasklist milestones plus five
@@ -179,5 +199,6 @@ behavior worth knowing about.)
 - Enabled GitHub private vulnerability reporting as the primary security
   contact path (`.github/SECURITY.md`).
 
-[Unreleased]: https://github.com/roman-zaglauer/octobot-mcp/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/roman-zaglauer/octobot-mcp/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/roman-zaglauer/octobot-mcp/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/roman-zaglauer/octobot-mcp/releases/tag/v1.0.0

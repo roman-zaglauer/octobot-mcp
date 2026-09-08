@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "octobot-mcp"
-version = "1.0.0"
+version = "1.0.1"
 description = "MCP server wrapping an OctoBot instance's web API for AI-agent-driven trading profile and backtest management"
 readme = "README.md"
 license = "MIT"
