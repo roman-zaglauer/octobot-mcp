@@ -58,13 +58,21 @@ verification":
   seconds after a restart. Confirmed sane in the first seconds after a
   restart by the live testing above (it was the exact route dense-polled
   throughout both trials).
-- **Still open** (requirements doc open question #14, NOT resolved by this
-  round): whether "ready" (now correctly meaning "observed a real outage,
-  then reachable again") coincides with "the tentacle-config cache is
-  actually clear." No backtest was run against a previously-tuned evaluator
-  config after a test restart to confirm the tuning is actually reflected
-  immediately once ready -- see `wait_for_octobot_ready`'s own docstring,
-  which states this plainly rather than implying it has been verified.
+- **Resolved NEGATIVELY, a further follow-up round** (requirements doc open
+  question #14): whether "ready" (correctly meaning "observed a real
+  outage, then reachable again") coincides with "the tentacle-config cache
+  is actually clear" -- it does not, confirmed. `SimpleStrategyEvaluator`'s
+  `default_config`/`required_evaluators` were checked immediately after a
+  genuine, dense-polled restart and were unchanged. The SAME end result
+  (restart does not unblock strategy-composition-tuning validation via
+  backtest) was independently confirmed on an entirely different OctoBot
+  instance/session. **This capability's whole stated purpose (see this
+  module's opening paragraph) does not hold** -- see
+  `docs/adr/0010-octobot-restart-capability.md`'s "Negative finding"
+  (Context) for the full account, `wait_for_octobot_ready`'s own docstring
+  for the user-facing statement of this, and that ADR's "Alternatives
+  considered" for the resulting open question of whether to keep this
+  capability at all.
 
 This module's own tests all mock the HTTP transport (no live OctoBot
 instance is exercised by the test suite); the live verification described
@@ -91,8 +99,8 @@ from octobot_mcp.tools.profiles import _fetch_and_parse_profiles
 #: `wait_for_octobot_ready`'s own docstring). n=2, one instance/version --
 #: informed defaults, not a universal guarantee; override if your
 #: environment differs. Open question #14's OTHER half (whether "ready"
-#: coincides with the tentacle-config cache actually being clear) remains
-#: unresolved regardless of these two values.
+#: coincides with the tentacle-config cache actually being clear) is now
+#: resolved NEGATIVELY, not just unresolved -- see this module's docstring.
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 
@@ -361,16 +369,22 @@ async def wait_for_octobot_ready(
     now means "the server went down and came back," not just "answered."
 
     **"Ready" (even with the fix above) still means ONLY "the HTTP server
-    answered a request again after a confirmed outage" -- nothing more.**
-    `[UNVERIFIED]`, open question #14, NOT fully resolved by this session's
-    testing: whether that moment coincides with "OctoBot's tentacle-config
-    cache (`_TENTACLE_CONFIG_CACHE`, ADR-0010's root-cause analysis) is
-    actually clear" -- the very fix this capability exists to let you
-    validate via backtest -- was NOT independently confirmed this session
-    (no backtest was run after the test restarts; only the HTTP-reachability
-    timing was measured). Do not assume a `ready: true` result means a
-    subsequent backtest will reflect a just-tuned evaluator config; it may
-    need additional, unquantified time beyond "HTTP reachable."
+    answered a request again after a confirmed outage" -- nothing more, and
+    this is now a CONFIRMED gap, not a suspected one.** A follow-up live
+    test checked `SimpleStrategyEvaluator`'s `default_config`/
+    `required_evaluators` immediately after a genuine, confirmed restart
+    (dense-polled, not a race) -- unchanged from before the restart. The
+    same end result (restart does not unblock strategy-composition-tuning
+    validation via backtest) was independently confirmed on an entirely
+    separate OctoBot instance/session. **Do not present `restart_octobot`/
+    `wait_for_octobot_ready` as a fix for evaluator/strategy-composition
+    tuning validation -- that was this capability's whole stated purpose
+    (ADR-0010's Context) and it does not hold.** See ADR-0010's "Negative
+    finding" (Context) and Consequences for the full account, including
+    an open question of whether this capability should be kept at all
+    given its purpose doesn't hold. Order-execution parameters (sizing,
+    stop-loss/take-profit) are unaffected by any of this and apply
+    correctly in a `profile_id`-targeted backtest without a restart.
 
     `DEFAULT_TIMEOUT_SECONDS`/`DEFAULT_POLL_INTERVAL_SECONDS` (60s/2s):
     the 60s timeout has real headroom above the ~8.5-8.9s measured

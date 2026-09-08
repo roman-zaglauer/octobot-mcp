@@ -238,9 +238,9 @@ continuing the same numbering:
     `update_tentacles_activation_config`'s own body this session. Developer
     must confirm before finalizing `update_evaluator_config`'s
     `deactivate_others` parameter's default and documented behavior.
-14. **End-to-end OctoBot restart timing — PARTIALLY RESOLVED; whether
-    "HTTP-reachable again" coincides with "the tentacle-config cache is
-    actually clear" remains open** (ADR-0010). Timing: resolved by live
+14. **End-to-end OctoBot restart timing — RESOLVED. Whether "HTTP-reachable
+    again" coincides with "the tentacle-config cache is actually clear" —
+    RESOLVED NEGATIVELY: it does not** (ADR-0010). Timing: resolved by live
     testing (two real restarts, `SIMULATOR` profile, OctoBot 2.1.1 test
     instance) — the HTTP server stayed reachable for ~2.1s post-trigger
     (matching OctoBot's own confirmed `restart_bot(delay=2)`), was
@@ -252,13 +252,21 @@ continuing the same numbering:
     within OctoBot's ~2s pre-kill grace window and hit the OLD process,
     falsely reporting `ready: true` in ~0.05s before anything had actually
     restarted. Fixed: a success now only counts as `ready: true` once at
-    least one prior poll in the same call has genuinely failed. **Still
-    open**: whether "ready" (HTTP reachable after a confirmed outage) means
-    the tentacle-config cache is actually clear was NOT independently
-    verified — no backtest was run against a previously-tuned evaluator
-    config after a test restart to confirm the tuning is actually reflected
-    immediately once ready. See ADR-0010's Risks table for the same open
-    item.
+    least one prior poll in the same call has genuinely failed.
+    **Cache-clearing coincidence, resolved negatively in a follow-up
+    session**: a real, genuine restart was confirmed via dense polling, then
+    `SimpleStrategyEvaluator`'s `default_config`/`required_evaluators` were
+    checked immediately after "ready" — unchanged from before the restart.
+    Tracing this into OctoBot source showed those specific fields are
+    static per-tentacle config values, not activation-dependent at all, so
+    this doesn't fully rule out the cache theory for every mechanism — but
+    the user separately confirmed the same end result (restart does not
+    unblock composition-tuning validation) on an entirely different OctoBot
+    instance/session, independent of this specific field's quirk. This
+    capability's stated purpose does not hold; see ADR-0010's Context
+    ("Negative finding") and Consequences for the full accounting, and its
+    "Alternatives considered" for the resulting open question of whether to
+    keep or remove `restart_octobot`/`wait_for_octobot_ready`.
 
 ## Traceability
 Source material: OctoBot GitHub (Drakkar-Software/OctoBot, `master` branch,

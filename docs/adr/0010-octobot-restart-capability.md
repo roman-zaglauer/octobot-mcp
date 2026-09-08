@@ -1,11 +1,17 @@
-# ADR-0010: An OctoBot-restart capability (`restart_octobot` / `wait_for_octobot_ready`), scoped to unblock evaluator-config-tuning backtest validation
+# ADR-0010: An OctoBot-restart capability (`restart_octobot` / `wait_for_octobot_ready`) — shipped, working, but does NOT unblock the evaluator-config-tuning backtest validation it was built for
 
 ## Status
-Accepted (Decision 3 revised after initial drafting — see note below).
-Downstream artefacts written: FR-30/FR-31/NFR-17/open question #14
-(requirements doc), the "Instance lifecycle" section (tool spec), and
-tasklist item 18 (implementation task, step 0 blocking on a live-restart
-timing measurement).
+Accepted and implemented (Decision 3 revised after initial drafting — see
+note below). Downstream artefacts written: FR-30/FR-31/NFR-17/open question
+#14 (requirements doc), the "Instance lifecycle" section (tool spec), and
+tasklist item 18. **Post-shipping: the capability's stated purpose is
+confirmed NOT achieved** (Context's "Negative finding", Consequences,
+Risks table) — the tools themselves are correct, tested, and safe-as-designed
+(restart timing measured, a real readiness-check race bug found and fixed),
+but restarting does not make OctoBot's backtests reflect
+strategy-composition config changes, confirmed on two independent
+instances. Whether to keep or remove this capability given that is an open
+decision for the user — see "Alternatives considered."
 
 ## Context
 
@@ -188,12 +194,46 @@ resolved; the other two remain open):**
   observing at least one genuinely failed poll before a later success
   counts as `ready: true`. See the tool's own updated docstring
   (`src/octobot_mcp/tools/instance_lifecycle.py`) for the full account.
-- **Still open**: whether "ready" (now correctly meaning "observed a real
-  outage, then reachable again") coincides with "the tentacle-config cache
-  is actually clear." This testing round did not run a backtest against a
-  previously-tuned evaluator config after a restart to check — only HTTP
-  reachability timing was measured. Requirements doc open question #14
-  reflects this partial resolution.
+- **Still open at that point**: whether "ready" (now correctly meaning
+  "observed a real outage, then reachable again") coincides with "the
+  tentacle-config cache is actually clear." That round did not run a
+  backtest against a previously-tuned evaluator config after a restart to
+  check — only HTTP reachability timing was measured.
+
+**Negative finding, a further follow-up session — this capability does NOT
+achieve the workflow it was built for.** The gap above was closed directly:
+`SimpleStrategyEvaluator`'s `default_config`/`required_evaluators` were
+checked before and after a further real, confirmed restart (same
+`SIMULATOR` profile, `ADXMomentumEvaluator` toggled first) — both fields
+were unchanged, restart included. Tracing this into
+`strategy_evaluator.py` source revealed the actual bug: **the evaluator
+never even reaches the code path this ADR's root cause targeted.**
+`get_default_evaluators`/`get_required_evaluators` just read a STATIC,
+per-strategy-tentacle config value (`strategy_config[TENTACLE_DEFAULT_CONFIG]`/
+`strategy_config[STRATEGIES_REQUIRED_EVALUATORS]`, e.g. `["*"]` = "any
+evaluator satisfies this strategy") — they are not derived from which
+individual evaluators are toggled on/off via `update_evaluator_config` at
+all, restart or not. **Independently, the user separately confirmed the
+same negative result on an entirely different OctoBot bot/session**: the
+restart mechanism itself worked correctly there too (genuine restarts, not
+a race), but did not unblock strategy-composition-parameter validation via
+backtest on that instance either.
+
+**Conclusion**: `restart_octobot`/`wait_for_octobot_ready` are working,
+correctly-implemented, safe-as-designed infrastructure — but this ADR's
+own stated purpose (unblocking evaluator-config-tuning backtest validation
+by clearing `_TENTACLE_CONFIG_CACHE`) is **empirically disproven**, on two
+independent instances, not merely unverified. Do not describe this
+capability to a user as a fix for strategy-composition backtest
+validation. See [[octobot-backtest-strategy-composition-gap]] (session
+memory) and the "Consequences" section below for the full accounting. The
+actual OctoBot-side mechanism blocking composition-parameter propagation
+into `profile_id`-targeted backtests remains genuinely unidentified — a
+plausible next hypothesis (untested) is that the independent-backtesting
+subprocess loads its own separate config snapshot at spawn time,
+independent of the running process's cache/memory state, which would
+explain why even a freshly-restarted process's backtest still doesn't
+reflect the change; this was not traced into source this session.
 
 ## Decision
 
@@ -420,10 +460,15 @@ Following this project's one-class-per-domain-failure convention
 
 ## Consequences
 
-### Positive
-- Unblocks the one workflow this ADR exists for: an agent can tune
+### Positive — **[the primary one below is SUPERSEDED — see "Negative" below]**
+- ~~Unblocks the one workflow this ADR exists for: an agent can tune
   evaluator config, restart, and get a backtest that actually reflects the
-  change — currently impossible through this server at all.
+  change — currently impossible through this server at all.~~ **This did
+  NOT happen.** A later follow-up session confirmed, on two independent
+  OctoBot instances, that restart does not unblock this workflow — see
+  Context's "Negative finding" subsection. Struck through rather than
+  deleted so this ADR's own original (incorrect) expectation stays visible
+  alongside the correction.
 - The narrow scoping (risk-scaled confirm-gating, job-store refusal) keeps
   the blast radius of this admittedly-never-fully-safe capability as small
   as the stated use case allows, without blocking that use case, and
@@ -438,15 +483,29 @@ Following this project's one-class-per-domain-failure convention
   doesn't).
 
 ### Negative
+- **This capability does not achieve the workflow it was built for.**
+  Confirmed by direct testing (a real evaluator-tune → restart →
+  re-check cycle) on two independent OctoBot instances/sessions: restarting
+  does not make strategy-composition parameters (which/how-many evaluators
+  are required) show up correctly afterward. The actual blocker is not
+  fully identified (see Context's "Negative finding" for the ruled-out
+  `_TENTACLE_CONFIG_CACHE` mechanism and one untested next hypothesis). This
+  ADR's core premise — that a restart clears the relevant staleness — was
+  wrong, or at best incomplete, for the workflow it was written to serve.
 - This is the first tool in the project whose safety cannot be fully
   engineered — only scoped. Even for a `SIMULATOR` profile with no active
   job, the abrupt kill-and-reexec (no graceful shutdown) is inherent to
   OctoBot's own restart mechanism, not a limitation of this server's design
   that a better implementation could remove. This must be stated in the
-  tool's own docstring, not softened.
+  tool's own docstring, not softened. This risk is now accepted for a
+  capability confirmed NOT to deliver its originally-stated benefit —
+  worth weighing when deciding whether to keep `restart_octobot` at all
+  (see "Alternatives considered" for a discussion of removing it).
 - `wait_for_octobot_ready`'s readiness signal is weaker than callers may
-  assume (HTTP-reachable vs. cache-actually-cleared) — an `[UNVERIFIED]` gap
-  this ADR does not resolve, only surfaces (see Risks).
+  assume (HTTP-reachable vs. cache-actually-cleared) — confirmed, not just
+  suspected, to matter: a real cache-adjacent field (`SimpleStrategyEvaluator`'s
+  `default_config`) was checked and never changed even after a genuine,
+  confirmed restart (see Context's "Negative finding").
 - Restarting while a `LIVE` profile is selected is permitted with only a
   stronger confirmation prompt (decision 3), not a hard block — this relies
   on the calling agent (and whatever human reviews its plan) actually
@@ -468,7 +527,7 @@ Following this project's one-class-per-domain-failure convention
 | Risk | Severity | Likelihood | Mitigation |
 |---|---|---|---|
 | Abrupt kill-and-reexec with no graceful shutdown is inherent to OctoBot's own restart mechanism and cannot be made safe by this server | High | Certain (whenever the tool is used) | Confirm-gated (decision 2) with a risk-scaled reason string for `LIVE` profiles (decision 3); OctoBot's own changelog/source evidence (Context) shows restart-during-live-trading is a designed, hardened scenario with exchange-side reconciliation on boot, which narrows but does not eliminate this risk — stated plainly in the tool description as an accepted, unremovable trade-off, not engineered around, because it cannot be |
-| `wait_for_octobot_ready`'s "ready" (HTTP-reachable after a confirmed outage) may not coincide with "the tentacle-config cache is actually clear," the very fix this capability exists to validate | Medium | Medium — `[UNVERIFIED]`, PARTIALLY narrowed: end-to-end timing IS now measured (two live restarts, ~8.5–8.9s total; see Context's "Post-shipping live verification"), but whether a backtest run immediately at "ready" actually reflects a tuned evaluator config was not tested | A future session should run a full evaluator-tune → restart → backtest cycle and confirm the result reflects the tuning; until then, `wait_for_octobot_ready`'s docstring states this gap plainly rather than implying it's closed |
+| `wait_for_octobot_ready`'s "ready" (HTTP-reachable after a confirmed outage) does NOT coincide with "the tentacle-config cache is actually clear" — CONFIRMED, not just suspected | High — this is the capability's entire stated purpose, and it does not hold | Certain (confirmed on two independent OctoBot instances/sessions) | None available yet — this ADR's root-cause theory (`_TENTACLE_CONFIG_CACHE`) was traced and ruled out as the (sole) blocker for at least one tested mechanism (`SimpleStrategyEvaluator`'s `default_config`/`required_evaluators`, which turned out to be static per-tentacle config, not activation-dependent at all); the real blocker is unidentified. See Context's "Negative finding" and "Alternatives considered"'s removal-vs-keep discussion |
 | A naive "first successful poll wins" implementation of `wait_for_octobot_ready` can report a false `ready: true` by racing OctoBot's own ~2s pre-kill grace window and hitting the OLD, not-yet-killed process — **found live, twice, and fixed** | Was High before the fix (would have silently defeated the whole capability); now Resolved | Was Certain given the confirmed ~2s scheduling delay; now N/A | Fixed: `wait_for_octobot_ready` now requires observing at least one genuinely failed poll before a later success counts as `ready: true` (`src/octobot_mcp/tools/instance_lifecycle.py`, regression test in `tests/test_tools_instance_lifecycle.py`) |
 | A backtest/data-collection job starts in the narrow window between the job-store check and the actual reboot call | Low | Low (single-client assumption, A3) | Accepted residual risk given A3; revisit if multi-instance/multi-client support is ever added (NFR-11) |
 | `/wait_reboot`'s HTML response shape/status code changes in a future OctoBot version | Low | Low | Only the HTTP status code is inspected, never the HTML body — minimal coupling surface; document the last-verified OctoBot version (2.1.1) alongside the tool, per this project's existing scrape-adapter convention |
@@ -512,6 +571,30 @@ Following this project's one-class-per-domain-failure convention
   caller-driven choice with server-side inference of intent, which this
   project consistently avoids elsewhere (e.g. `require_confirmation` itself
   blocks rather than warns).
+
+**Post-negative-finding alternative, not yet acted on: remove
+`restart_octobot`/`wait_for_octobot_ready` entirely, since the workflow
+they were built for is confirmed not to work.** Deliberately NOT decided by
+this ADR update — flagged for the user, not resolved unilaterally, since
+removing a shipped capability is a decision on the same footing as the
+original "go" call (ADR-0010's own Decision 1), not something a documentation
+pass should decide alone. Arguments either way, for whoever does decide:
+- **For removal**: the capability's only stated justification (Context) no
+  longer holds; keeping a tool whose docstring has to explain "this doesn't
+  actually do what it sounds like it does" is worse than not having it,
+  and it remains the one tool in this project that can never be made fully
+  safe (Consequences/Negative) — a real, standing risk with no offsetting
+  benefit now that the benefit is disproven.
+- **For keeping it**: restarting OctoBot is a generically useful operational
+  primitive independent of the evaluator-tuning use case (e.g. recovering a
+  hung process, applying some OTHER config change OctoBot itself requires a
+  restart for — not investigated here), and the implementation itself
+  (confirm-gating, job-store check, honest readiness polling with the race
+  bug fixed) is correct, tested, and low-maintenance to keep around; ripping
+  it out would also discard the real, verified restart-timing data captured
+  here. Any future use should not lean on the (now falsified) "unblocks
+  composition-tuning backtests" framing, but a general-purpose restart tool
+  can be independently useful with its docstring corrected.
 
 ## Downstream artefacts a "go" would need (not written by this ADR)
 Mirroring how ADR-0007/ADR-0008 each named their own follow-on work:

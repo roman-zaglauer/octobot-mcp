@@ -187,23 +187,27 @@ and fixed: its first poll fires immediately, which can (and, live, twice, \
 did) land within OctoBot's own ~2s pre-kill grace window and hit the OLD \
 process, falsely reporting `ready: true` before anything actually \
 restarted. It now requires observing at least one genuinely unreachable \
-poll before a later success counts as `ready: true`. Even with that fix, \
-do not assume "ready" means the tentacle-config cache this capability \
-exists to clear is actually cleared -- that timing was NOT independently \
-verified this session (no backtest was run after a test restart).
-- Restarting fixes the SPECIFIC `_TENTACLE_CONFIG_CACHE` bug behind \
-evaluator-requirements tuning (see above), but this is NOT confirmed to be \
-a universal fix for every strategy-COMPOSITION tuning case: the same \
-symptom (a `profile_id`-targeted backtest not reflecting a config change) \
-has independently been observed on an unrelated trading-mode-level field \
-(`DailyTradingMode.required_strategies_min_count`), suggesting a broader \
-OctoBot backtest-engine limitation, not a single isolated cache. \
+poll before a later success counts as `ready: true`.
+- **`restart_octobot` does NOT actually unblock evaluator/strategy-config \
+tuning validation via backtest -- confirmed negative, not just unverified.** \
+The mechanism works correctly (real restarts, verified via dense polling), \
+but a real cache-adjacent field (`SimpleStrategyEvaluator`'s \
+`default_config`/`required_evaluators`) was checked immediately after a \
+genuine restart and was unchanged -- tracing this into OctoBot source found \
+those fields are static per-tentacle config, not activation-dependent at \
+all, so this doesn't rule out the cache theory for every mechanism, but the \
+SAME end result (restart doesn't unblock composition-tuning validation) was \
+independently confirmed on an entirely different OctoBot instance/session. \
 Order-execution parameters (position sizing, stop-loss/take-profit levels) \
-are unaffected and DO apply correctly in a `profile_id`-targeted backtest. \
+DO apply correctly in a `profile_id`-targeted backtest, restart or not. \
 Strategy-composition parameters (which/how-many evaluators or strategies \
-must agree) should be treated as suspect until independently reverified for \
-that specific mechanism -- do not assume `restart_octobot` resolves every \
-future case just because it resolved this one.
+must agree) currently CANNOT be validated via backtest through this \
+server, restart included -- do not present `restart_octobot` as a fix for \
+this, and do not assume any future variant of this problem will be solved \
+by restarting either, since the actual root cause is still unidentified. \
+See `docs/adr/0010-octobot-restart-capability.md`'s "Negative finding" for \
+the full account, including an open question of whether to keep this \
+capability at all now that its stated purpose doesn't hold.
 
 ## Safety
 
