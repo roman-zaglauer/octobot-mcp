@@ -25,8 +25,18 @@ omitting it is valid input, not a schema error). At the application layer:
 Tools requiring `confirm=true` (full rationale and mapping to OctoBot routes
 in the spec):
 - `delete_profile` — irreversible deletion of a profile.
-- `convert_profile_to_live` — closest confirmed signal to enabling
-  real-money trading (converts a profile to `LIVE` type and selects it).
+- `convert_profile_to_live` — gated originally as "the closest confirmed
+  signal to enabling real-money trading"; **a later session confirmed
+  against OctoBot source that this framing was wrong** — the tool only
+  relabels `profile.profile_type` and selects the profile, and does NOT
+  touch `config.trader.enabled`, the flag OctoBot's own `is_real_trading()`
+  actually checks (requirements doc open question #5, resolved). Kept
+  gated anyway: it still persistently changes the profile and its
+  selection, and — precisely because of this finding — a caller could
+  otherwise be misled into believing real trading is now active when it is
+  not. See `convert_profile_to_live`'s own docstring for the full account.
+  No tool in this project's scope can actually toggle real-vs-simulated
+  trading as of this writing.
 - `update_exchange_credentials` — writes exchange API key/secret.
 - `clear_orders_history`, `clear_trades_history`, `clear_portfolio_history`,
   `clear_transactions_history` — irreversible deletion of trading history.

@@ -81,8 +81,9 @@ listed under the requirements doc's "Out of scope" section.
 - Input: `{"profile_id": str}`; Output: `{"profile_id": str, "selected": true}`.
 
 #### `convert_profile_to_live(profile_id, confirm=false)`
-- Same confirm pattern as `delete_profile`, reason string: "This converts the profile to LIVE trading mode and selects it — real orders may be placed against a real exchange account."
-- Output: `{"profile_id": str, "profile_type": "LIVE", "selected": true}`.
+- **Does NOT enable real-money trading** — confirmed against source, resolving requirements doc open question #5. `is_real_trading(profile)` checks `config.trader.enabled` (`octobot_trading/util/config_util.py::is_trader_enabled`), a flag this tool's underlying `convert_to_live_profile`/`select_profile` calls never touch — they only set `profile.profile_type` and select the profile. No tool in this project's scope can set `config.trader.enabled` on an ordinary OctoBot instance (the one route found that does, `_save_distribution_user_config`, is registered only for the non-default `PREDICTION_MARKET` OctoBot distribution — unrelated to OctoBot's onboarding wizard — confirmed against `controllers/__init__.py::register()`).
+- Same confirm pattern as `delete_profile`, reason string: "This relabels the profile as OctoBot's internal LIVE type and selects it — but does NOT itself enable real-money trading (confirmed against source: OctoBot's actual real-vs-simulated switch, config.trader.enabled, is a separate flag this call never touches). Still gated because it persistently changes the profile and its selection, and could otherwise mislead a caller into believing real trading is now active when it is not."
+- Output: `{"profile_id": str, "profile_type": "LIVE", "selected": true}` — `profile_type` here is an echo of the internal label just set, not an independently re-verified fact (no Tier A/B signal exists to confirm it).
 
 #### `export_profile(profile_id)`
 - Output: `{"profile_id": str, "filename": str, "content_base64": str}`.
@@ -758,8 +759,13 @@ See requirements doc's "Open questions" section (1–6) — restated here as
 blocking implementation tasks for the specific tools they affect:
 `list_profiles`/`get_profile` (Q1), `update_exchange_credentials` (Q2),
 `get_job_result`/`compare_strategies` diff table (Q3), the backtest watcher
-(Q4), the `convert_profile_to_live`/confirm-gating completeness (Q5), and
-`start_backtest`'s `current_bot_data` mode field values (Q6).
+(Q4), and `start_backtest`'s `current_bot_data` mode field values (Q6).
+
+Q5 (`convert_profile_to_live`/confirm-gating completeness) is **resolved**
+(a later session): a separate real-vs-simulated toggle does exist
+(`config.trader.enabled`), `convert_profile_to_live` does not set it, and no
+in-scope tool does — see this tool's own entry above and ADR-0003's revised
+rationale.
 
 Historical-data-collection addendum open questions (requirements doc 7–11,
 ADR-0007/ADR-0008): `list_data_files`'s `file`-field type (Q7),

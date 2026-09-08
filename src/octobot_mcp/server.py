@@ -142,13 +142,21 @@ messages, or anywhere else, only a last-4-characters hint.
 literally an empty string on this OctoBot version -- an uninformative \
 error here is a known OctoBot-side limitation, not a sign this server \
 dropped information.
-- The `profile_type` field `list_profiles`/`get_profile` return \
-(`"LIVE"`/`"SIMULATOR"`/`"UNKNOWN"`) reflects whether a real vs. simulated \
-TRADER is currently enabled in that profile's own config -- it is a \
-different concept from what `convert_profile_to_live` actually sets \
-(OctoBot's internal live/backtesting profile type), and converting a \
-profile to live does not necessarily change this scraped field. Don't use \
-one as a proxy for the other.
+- **`convert_profile_to_live` does NOT enable real-money trading -- confirmed \
+against OctoBot source, not just suspected.** It only sets `profile.profile_type` \
+(an internal label) and selects the profile. Whether OctoBot actually places \
+real orders is governed entirely by a SEPARATE config flag, `config.trader.enabled` \
+(checked by OctoBot's own `is_real_trading()`), which `convert_to_live_profile` \
+and `select_profile` both leave untouched -- confirmed by reading both \
+functions' full bodies. This resolves what was previously an open question \
+(requirements doc, open question #5): yes, a separate flag exists, and this \
+server currently has NO tool that sets it. The `profile_type` field \
+`list_profiles`/`get_profile` return (`"LIVE"`/`"SIMULATOR"`/`"UNKNOWN"`) \
+reflects `config.trader.enabled`, NOT the internal `profile.profile_type` \
+attribute `convert_profile_to_live` sets -- two unrelated OctoBot concepts \
+that merely share a confusingly similar name. Do not tell a user or agent \
+that calling `convert_profile_to_live` makes a profile trade with real \
+money; it does not, by itself.
 - A `start_data_collection` job against a bad/misspelled exchange name \
 does NOT fail -- OctoBot reports an identical `"finished"` success status \
 regardless, so a collection that produced no real data is \

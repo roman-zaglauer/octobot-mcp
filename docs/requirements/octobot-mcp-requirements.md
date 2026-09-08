@@ -47,7 +47,7 @@ tentacles/logs where a real endpoint exists.
 | FR-4 | The server SHALL provide a tool to update a profile's mutable fields (name, description, risk, complexity, config). | MUST | Given a valid `profile_id` and patch, when `update_profile` is called, then OctoBot's stored profile reflects the patch and the tool returns the updated fields. |
 | FR-5 | The server SHALL provide a tool to delete a profile, gated by `confirm=true` (ADR-0003). | MUST | Given a valid `profile_id` and `confirm` omitted/false, when `delete_profile` is called, then no deletion occurs and a refusal explaining the required flag is returned. Given `confirm=true`, then the profile is deleted. |
 | FR-6 | The server SHALL provide a tool to select a profile as the currently active one. | MUST | Given a valid `profile_id`, when `select_profile` is called, then subsequent `list_profiles` calls show that profile as `is_selected: true`. |
-| FR-7 | The server SHALL provide a tool to convert a profile to a live-trading profile and select it, gated by `confirm=true`. | MUST | Given `confirm=false`/omitted, no conversion occurs and a refusal is returned naming the live-trading risk. Given `confirm=true`, the profile is converted and selected. |
+| FR-7 | The server SHALL provide a tool to relabel a profile as OctoBot's internal `LIVE` profile type and select it, gated by `confirm=true`. **Note (open question #5, resolved): this does NOT enable real-money trading** — that is governed by a separate `config.trader.enabled` flag this tool never touches; no tool in this server's scope can set that flag (see open question #5). | MUST | Given `confirm=false`/omitted, no conversion occurs and a refusal is returned explaining the relabeling is not itself a real-trading toggle. Given `confirm=true`, `profile.profile_type` is set to `LIVE` and the profile is selected — `config.trader.enabled` is unaffected either way. |
 | FR-8 | The server SHALL provide a tool to export a profile as a downloadable archive. | SHOULD | Given a valid `profile_id`, when `export_profile` is called, then the result contains a base64-encoded zip payload and a filename. |
 | FR-9 | The server SHALL provide a tool to start a backtest, either against explicit historical data files or against the currently active profile/exchange, returning a `job_id` immediately (no blocking). | MUST | When `start_backtest` is called with either valid `mode`, then the call returns within 2s with a `job_id` and `state: "queued"` or `"running"`, without waiting for the backtest to finish. |
 | FR-10 | The server SHALL provide a tool to poll job status, returning state, progress percentage, elapsed time, ETA, and ETA confidence. | MUST | Given a `job_id` for a running backtest, when `get_job_status` is called, then the result includes `progress_percent` (0–100), `elapsed_seconds`, `eta_seconds` (nullable), and `eta_confidence` ∈ {low, medium, high}. |
@@ -151,12 +151,31 @@ tentacles/logs where a real endpoint exists.
 4. **`python-socketio` client compatibility with OctoBot's bundled
    Flask-SocketIO version** — not verified; first implementation task for
    the backtest-watcher milestone (see ADR-0002 risks).
-5. **Whether a separate "simulated vs. live" toggle exists beyond profile
-   `profile_type`** — `convert_profile_to_live` is the only confirmed
-   live-trading signal; if OctoBot also gates real order placement on a
-   separate exchange-level flag, that flag is currently unaccounted for and
-   should be confirmed against source/live instance before considering the
-   confirm-gating list (ADR-0003) complete.
+5. **RESOLVED (confirmed against source, a later session): yes, a separate
+   "simulated vs. live" toggle exists, and `convert_profile_to_live` does
+   NOT set it.** `is_real_trading(profile)` (`web_interface/models/profiles.py`)
+   returns `trading_util.is_trader_enabled(profile.config)`, which reads
+   `config[CONFIG_TRADER][CONFIG_ENABLED_OPTION]` (`config.trader.enabled`)
+   — confirmed via `octobot_trading/util/config_util.py`. `convert_to_live_profile`
+   only sets `profile.profile_type = ProfileType.LIVE`; `select_profile`
+   (the other function `convert_profile_to_live`'s route calls) only updates
+   profile selection and tentacle config. Neither touches
+   `config.trader`/`config.trader-simulator` at all — confirmed by reading
+   both functions' full bodies. **`convert_profile_to_live` therefore does
+   not, and cannot, enable real-money trading by itself** — see FR-7's
+   revised acceptance criterion and `convert_profile_to_live`'s own
+   docstring. The one HTTP-visible route found that DOES set
+   `config.trader.enabled` (`_save_distribution_user_config`,
+   `web_interface/models/configuration.py`) is registered only when the
+   OctoBot instance's distribution is `OctoBotDistribution.PREDICTION_MARKET`
+   (confirmed against `controllers/__init__.py::register()`), mutually
+   exclusive with the `DEFAULT` distribution this project assumes
+   throughout — unrelated to OctoBot's actual onboarding wizard
+   (`controllers/welcome.py`, always registered). This server currently has
+   **no tool** that can toggle real-vs-simulated trading on an ordinary
+   OctoBot instance. Whether to build one (which would need its own ADR,
+   given the stakes) is an open, undecided question, not something this
+   resolution silently answers.
 6. **Valid values/format for `start_backtest`'s `current_bot_data` mode
    fields** (`exchange_id`, `exchange_type`, `data_source`) — only the route
    and action-dispatch (`start_backtesting_with_current_bot_data`) are

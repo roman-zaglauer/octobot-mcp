@@ -1007,7 +1007,39 @@ async def delete_profile(ctx: Context, profile_id: str, confirm: bool = False) -
 
 @with_error_handling
 async def convert_profile_to_live(ctx: Context, profile_id: str, confirm: bool = False) -> Any:
-    """Convert a profile to LIVE trading mode and select it. Confirm-gated (ADR-0003).
+    """Relabel a profile as OctoBot's internal `ProfileType.LIVE` and select it. Confirm-gated (ADR-0003).
+
+    **This tool does NOT enable real-money trading -- confirmed against
+    OctoBot source, not just suspected (resolves requirements doc open
+    question #5).** Whether OctoBot actually places real orders is governed
+    entirely by a separate config flag, `config.trader.enabled`, checked by
+    OctoBot's own `is_real_trading(profile)` (semantically: returns
+    `trading_util.is_trader_enabled(profile.config)`, itself
+    `config[CONFIG_TRADER][CONFIG_ENABLED_OPTION]` -- both confirmed against
+    source, not a verbatim one-line quote of the actual multi-statement
+    function body). `models.convert_to_live_profile` and `models.select_profile`
+    (the two functions this tool's route calls -- see "Spec correction #1"
+    below) both leave `config.trader`/`config.trader-simulator` completely
+    untouched; only `profile.profile_type` (a label) changes. The one
+    HTTP-visible route this project found that DOES set `config.trader.enabled`
+    (`_save_distribution_user_config`, reached via `save_prediction_market_configuration`
+    in OctoBot's web-interface source) is registered only when the running
+    OctoBot instance's distribution is `OctoBotDistribution.PREDICTION_MARKET`
+    -- an `elif` branch mutually exclusive with the `DEFAULT` distribution
+    this project assumes throughout (confirmed against
+    `controllers/__init__.py::register()`); it has nothing to do with
+    OctoBot's onboarding wizard (a separate, always-registered
+    `controllers/welcome.py`). This route is therefore unreachable on the
+    ordinary/default OctoBot instance this server targets, not because of
+    this project's own "onboarding" out-of-scope exclusion (a previous
+    version of this docstring cited that exclusion; it was the wrong
+    reason, even though the practical conclusion below still holds).
+    **As of this writing, this server has NO tool that can actually toggle
+    real-vs-simulated trading on a default OctoBot instance.** If you need
+    that, it currently requires editing `config.trader`/`config.trader-simulator`
+    in the profile's own saved config file directly (outside this server)
+    and re-importing/re-selecting the profile -- there is no safer,
+    HTTP-API-driven path this server can offer today.
 
     If `confirm` is not exactly `true`, no OctoBot call is made at all --
     this returns `require_confirmation`'s structured refusal (a normal
@@ -1112,9 +1144,14 @@ async def convert_profile_to_live(ctx: Context, profile_id: str, confirm: bool =
         return require_confirmation(
             "convert_profile_to_live",
             profile_id,
-            "This converts the profile to LIVE trading mode and selects "
-            "it -- real orders may be placed against a real exchange "
-            "account.",
+            "This relabels the profile as OctoBot's internal LIVE type and "
+            "selects it -- but does NOT itself enable real-money trading "
+            "(confirmed against source: OctoBot's actual real-vs-simulated "
+            "switch, config.trader.enabled, is a separate flag this call "
+            "never touches). Still gated because it persistently changes "
+            "the profile and its selection, and could otherwise mislead a "
+            "caller into believing real trading is now active when it is "
+            "not.",
         )
 
     client = get_client(ctx)
