@@ -22,12 +22,10 @@ the gap before a fix ships.
 
 Instead, report it privately to:
 
-Contact **@roman-zaglauer** directly via GitHub (a direct message, or an
-issue on a *different*, non-security repository if you have no other way to
-reach out) — private vulnerability reporting is not yet enabled on this
-repository; once it is (Settings → Security → Private vulnerability
-reporting), prefer opening a [private security advisory](https://github.com/roman-zaglauer/octobot-mcp/security/advisories/new)
-instead.
+Open a [private security advisory](https://github.com/roman-zaglauer/octobot-mcp/security/advisories/new)
+for this repository (GitHub → Security tab → Report a vulnerability) —
+this is enabled and is the preferred path. If you'd rather not use the
+advisory form, contact **@roman-zaglauer** directly via GitHub instead.
 
 Please include:
 
