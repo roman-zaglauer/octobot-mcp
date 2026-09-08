@@ -49,6 +49,11 @@ genuinely new-scope addendum narrowly reversing this project's own "reboot"
 out-of-scope exclusion) adds `restart_octobot` (**confirm-gated**, ADR-0003 --
 the first tool in this project whose safety cannot be fully engineered, only
 scoped) and `wait_for_octobot_ready` (not confirm-gated, a read-only poll).
+Task 19 (item 19, ADR-0009 -- originally recommended NO-GO, reversed to GO
+by explicit user decision, FR-32/NFR-18) adds `list_evaluators` (not
+confirm-gated, a third Tier-B HTML-scrape read adapter, `GET
+/advanced/evaluator_config`), closing `update_evaluator_config`'s own
+companion-read gap.
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
@@ -72,7 +77,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_TASK_18_TOOL_NAMES = {
+EXPECTED_TASK_19_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -119,6 +124,7 @@ EXPECTED_TASK_18_TOOL_NAMES = {
     "get_available_timeframes_for_collection",
     "restart_octobot",
     "wait_for_octobot_ready",
+    "list_evaluators",
 }
 
 
@@ -135,9 +141,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_task_18_tools(client: Client):
+async def test_server_lists_the_task_19_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_TASK_18_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_TASK_19_TOOL_NAMES
 
 
 @pytest.mark.anyio

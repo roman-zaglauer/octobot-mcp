@@ -180,6 +180,7 @@ listed under the requirements doc's "Out of scope" section.
 |---|---|---|---|
 | `update_trading_config(patch)` | W | no | `POST /config` (`TRADING_CONFIG_KEY` branch) [V] |
 | `update_evaluator_config(patch, deactivate_others?)` | W | no | `POST /config` (`EVALUATOR_CONFIG_KEY` branch) [V] |
+| `list_evaluators()` | R | no | Tier B: `GET /advanced/evaluator_config` [V] |
 
 #### `update_trading_config(patch)`
 - Input: `{"patch": object}` — the trading-mode tentacle-activation config
@@ -261,6 +262,40 @@ listed under the requirements doc's "Out of scope" section.
 - Not confirm-gated (ADR-0003): same rationale as `update_trading_config` —
   mutates which evaluators are active, does not destroy data, expose
   credentials, or enable live trading.
+
+#### `list_evaluators()`
+- **Addendum, ADR-0009** — a third Tier-B HTML-scrape read adapter,
+  originally recommended NO-GO (evaluator names are OctoBot's own public
+  tentacle catalog, discoverable without this server), then reversed to GO
+  by explicit user decision. Closes `update_evaluator_config`'s own
+  companion-read gap: that tool is unusable without already knowing an
+  evaluator's exact class name and current state.
+- Maps to `GET /advanced/evaluator_config` [V: fetched live this session,
+  OctoBot 2.1.1, HTTP 200]. Each evaluator renders as an `a.config-element`
+  element: `config-type="evaluator_config" config-key=<Name>
+  current-value=<Bool> config-value=<Bool> startup-config-value=<Bool>`,
+  inside one of four category containers, each a stable `id`: `
+  ta-evaluator-config-root` ("Technical analysis"),
+  `social-evaluator-config-root` ("Social analysis"),
+  `rt-evaluator-config-root` ("Real time analysis"),
+  `scripted-evaluator-config-root` ("Scripted evaluators") [V].
+- Output: `{"evaluators": [{"name": str, "enabled": bool, "type": str}]}`.
+  `name` = the `config-key` attribute value (the same string
+  `update_evaluator_config`'s `patch` keys must equal — the closed loop
+  between these two tools is structural, not a convention to maintain by
+  hand). `enabled` = the `current-value` attribute parsed as a bool.
+  `type` ∈ `{"technical_analysis", "social", "realtime", "scripted"}`,
+  taken from whichever container an evaluator's row was found inside —
+  always populated (confirmed rendered for every evaluator, never omitted).
+- Errors: `EvaluatorScrapeContractBrokenError` (Tier-B fail-loud, NFR-18) —
+  raised only if zero `config-element` rows are found across ALL FOUR
+  containers combined, or an expected container `id` is missing from the
+  page entirely. A single category legitimately having zero evaluators is
+  NOT an error [V: confirmed live — this project's own test instance has
+  zero "Scripted evaluators" installed, rendering an intact but empty
+  container]. Do not reuse `list_profiles`'s "zero is always broken" gate
+  model here — it does not fit this page.
+- Read-only, not confirm-gated.
 
 ---
 

@@ -1,13 +1,55 @@
-# ADR-0009: Evaluator discovery (`list_evaluators`) — recommend NOT adding a third Tier-B HTML-scrape adapter
+# ADR-0009: Evaluator discovery (`list_evaluators`) — a third Tier-B HTML-scrape adapter
 
 ## Status
-Accepted — **NO-GO**. User confirmed this recommendation; the "If no-go"
-cheap fixes below (steps 1-2) were applied directly (docstring/stub edits,
-no new tool), and the follow-up check in step 3 was performed: confirmed
-live against the OctoBot 2.1.1 test instance that `get_tentacle_config`'s
-response does NOT expose activation state (only the tentacle's own tunable
-parameters, e.g. RSI thresholds) — so the real gap is both evaluator names
-AND state, not names alone.
+**Superseded (reversed to GO) by explicit user decision.** Originally
+accepted as NO-GO; the user later explicitly asked to build the adapter
+anyway. The NO-GO analysis below (Context/"case for NO-GO"/Consequences/
+Risks/Alternatives) is preserved as the record of that first decision and
+remains accurate as a risk/trade-off analysis — only the final call
+changed, by direct user instruction, not because the analysis was found
+wrong. The "If go" section's design is now the accepted implementation
+plan, updated below with a completed live-verification pass that resolves
+its own previously-blocking pre-implementation task.
+
+**Live verification performed** (this session, `GET
+http://192.168.178.100:5001/advanced/evaluator_config`, OctoBot 2.1.1,
+fetched directly via `curl` — resolving the "Not verified this session"
+gap the original architect draft flagged): all three previously-open
+structural questions are now answered, all favorably for the "If go"
+design:
+1. **Activation state IS server-rendered, not client-side-JS-applied.**
+   Each evaluator row is a real, static `<a class="config-element" ...
+   config-type="evaluator_config" config-key=<Name> current-value=<Bool>
+   config-value=<Bool> startup-config-value=<Bool> ...>` element — a plain
+   BeautifulSoup parse recovers real state, no JS execution needed. (This
+   was the single highest-severity risk the original draft flagged; it does
+   not hold.)
+2. **Type/category grouping IS rendered**, as four distinct `<div
+   class="card">` sections, each with a stable container `id`: "Technical
+   analysis" (`id="ta-evaluator-config-root"`), "Social analysis"
+   (`id="social-evaluator-config-root"`), "Scripted evaluators"
+   (`id="scripted-evaluator-config-root"`), "Real time analysis"
+   (`id="rt-evaluator-config-root"`) — matching exactly the four evaluator
+   subtypes `update_evaluator_config`'s own `deactivate_others` logic
+   already operates on (ADR-0010's evidence trail). `type` can be populated
+   confidently, not omitted.
+3. **A legitimate zero-evaluators state exists and is structurally
+   distinguishable from a broken page**: on this instance, the "Scripted
+   evaluators" container renders with genuinely zero `config-element` rows
+   inside an otherwise-intact `<div class="row config-container"
+   id="scripted-evaluator-config-root">` — a real "this category has no
+   evaluators installed" state, not an error. The fail-loud gate should
+   therefore be scoped to the WHOLE page (zero `config-element` rows found
+   across ALL FOUR containers combined is broken/suspicious), not any
+   single category container (a single empty category is normal).
+
+A redundant secondary signal was also found: each row's CSS class includes
+`list-group-item-success` (enabled) vs. `list-group-item-light` (disabled),
+and a `<span class="badge badge-success">Activated</span>` /
+`badge-secondary">Deactivated</span>` badge — both agree with
+`current-value` on every row checked. Not required for the scrape (the
+`current-value` attribute is authoritative and simpler to parse), but
+available as a cheap cross-check in tests/fixtures if useful.
 
 ## Context
 
@@ -125,7 +167,7 @@ Resources.
 
 ---
 
-## If go (fully specified, so a future reversal of this recommendation doesn't have to re-derive it)
+## Implementation plan (was "If go" — now the accepted plan; live-verified this session)
 
 - **Tool name**: `list_evaluators()`. Confirmed available — `list_tentacles`'s
   existing Tier-C stub (`src/octobot_mcp/tools/tentacles.py`) does **not**
@@ -134,48 +176,74 @@ Resources.
   `list_evaluators` is free and matches this project's existing
   `list_profiles`/`list_data_files` naming convention exactly.
 - **Scrape target**: `GET /advanced/evaluator_config` — confirmed correct
-  (not a guess): this is the exact page `update_evaluator_config`'s own
-  live verification already used to confirm the `config-type`/`config-key`
-  attribute convention. No alternative page was found or considered.
+  by direct fetch this session (`curl`, OctoBot 2.1.1, 91617 bytes, HTTP 200).
+- **Confirmed exact row markup** (real excerpt from the live instance):
+  ```html
+  <a href="#" onclick="return false;"
+     class="col-md-6 col-lg-4 p-1 rounded list-group-item waves-effect list-group-item-success config-element"
+     id=BBMomentumEvaluator name=BBMomentumEvaluator
+     config-type="evaluator_config" config-key=BBMomentumEvaluator
+     current-value=True config-value=True startup-config-value=True
+     requirements="" default-elements="" requirements-min-count="">
+    ...
+    <span class="badge badge-success">Activated</span>
+    ...
+  </a>
+  ```
+  Select on `a.config-element` (or `a[config-type="evaluator_config"]`);
+  `name` = the `config-key` attribute; `enabled` = the `current-value`
+  attribute parsed as a bool (`"True"`/`"False"` string, confirmed literal
+  casing). The CSS class (`list-group-item-success`/`-light`) and the
+  `Activated`/`Deactivated` badge text agree with `current-value` on every
+  row checked — redundant, not required, but usable as a fixture
+  cross-check.
+- **Confirmed category grouping — resolves the type field**: four `<div
+  class="card">` sections, each wrapping a `<div class="row
+  config-container" id="...">`:
+  - `id="ta-evaluator-config-root"` (header "Technical analysis") → `type: "technical_analysis"`
+  - `id="social-evaluator-config-root"` (header "Social analysis") → `type: "social"`
+  - `id="rt-evaluator-config-root"` (header "Real time analysis") → `type: "realtime"`
+  - `id="scripted-evaluator-config-root"` (header "Scripted evaluators") → `type: "scripted"`
+
+  Parse each container separately and tag every `config-element` found
+  inside it with that container's `type` — do not try to infer type from
+  the evaluator's own class name.
 - **Output shape** (by direct analogy to `list_profiles`/`list_data_files`):
-  `{"evaluators": [{"name": str, "enabled": bool, "type": str | null}],
-  "warning": str | null}`. `name` is the `config-key` attribute value — the
-  same string `update_evaluator_config`'s `patch` keys must equal, making
-  the closed loop with that tool a structural guarantee, not a convention to
-  maintain by hand. `type` (one of the four evaluator subtypes
-  `deactivate_others` already operates on internally) is included only if
-  the live verification task below confirms it is actually rendered in the
-  DOM, not derived by guessing; if it isn't renderable, omit the field
-  rather than fabricate it (NFR-8's "never invent/rename a field" spirit).
+  `{"evaluators": [{"name": str, "enabled": bool, "type": str}]}`. `type`
+  is always populated now (confirmed rendered, not omitted per the original
+  draft's fallback) using the four literal values above. `name` is the
+  `config-key` attribute value — the same string `update_evaluator_config`'s
+  `patch` keys must equal, making the closed loop with that tool a
+  structural guarantee, not a convention to maintain by hand.
+- **Fail-loud gate, confirmed scope**: raise
+  `EvaluatorScrapeContractBrokenError` only if **zero** `config-element` rows
+  are found across **all four** containers combined, or if any of the four
+  expected container `id`s is missing from the page entirely. A single
+  category legitimately having zero rows is NOT an error — confirmed live:
+  this instance's own "Scripted evaluators" section renders with genuinely
+  zero evaluators inside an intact, correctly-structured empty container.
+  Do NOT reuse `list_profiles`'s "zero is always broken" gate model here —
+  it's the wrong fit for this page, as originally suspected and now confirmed.
 - **New exception**: `EvaluatorScrapeContractBrokenError(OctoBotAPIError)`
   in `src/octobot_mcp/errors.py`, following `ProfileScrapeContractBrokenError`/
   `DataFileScrapeContractBrokenError`'s exact documentation convention (one
-  domain-specific exception class per adapter, never conflated). Raised the
-  instant any structural assumption breaks — never a silent empty/partial
-  list.
-- **Required pre-implementation verification task** (blocking, mirroring
-  ADR-0006/ADR-0008's own first task): fetch and inspect the live
-  `/advanced/evaluator_config` page's actual rendered HTML — not source
-  templates alone — and confirm, in order: (1) the checked/unchecked state
-  is present in the static server-rendered HTML (not applied client-side
-  after load — if it's the latter, a `GET`-and-parse scrape cannot recover
-  activation state at all, and this design is not viable as scoped); (2) the
-  exact row/wrapper markup and whether type/category grouping is rendered;
-  (3) whether a zero-evaluators state is possible/renders distinguishably
-  from a broken page (mirroring `list_data_files`'s "containing table always
-  renders, even empty" fail-loud gate, `list_profiles`'s "OctoBot always
-  ships built-ins, so zero is always broken" gate is very likely the wrong
-  model here — do not assume without checking).
-- **Downstream artefacts a "go" decision would require** (not written here,
-  per this ADR's own scope): a new `FR-29` in
+  domain-specific exception class per adapter, never conflated).
+- **Pre-implementation verification task — COMPLETE** (was blocking, mirroring
+  ADR-0006/ADR-0008's own first task): all three sub-questions this task
+  asked are now answered from a real live fetch this session — see Status
+  and the "Live verification performed" note in Context above. No further
+  live verification is required before implementation; a developer should
+  still fetch the page again to build/validate a test fixture, but the
+  design's core structural assumptions are no longer open questions.
+- **Downstream artefacts this "go" requires** (not written here, per this
+  ADR's own scope — the orchestrator writes these next): `FR-32` in
   `docs/requirements/octobot-mcp-requirements.md` (mirroring FR-24's
   "including the exact identifier the write tool expects" framing) plus a
-  new `NFR-16` (mirroring NFR-12/NFR-13's scrape-reliability acceptance
+  new `NFR-18` (mirroring NFR-12/NFR-13's scrape-reliability acceptance
   criterion pattern); a new "`list_evaluators`" entry in the "Trading
   config" section of `docs/specs/octobot-mcp-tool-spec.md`, alongside
   `update_evaluator_config`; a new numbered `docs/tasklist.md` item mirroring
-  item 15/16's structure (verification task first, implementation second,
-  demo last).
+  item 15/16's structure (implementation, fixture-based tests, demo).
 
 ## If no-go (the recommended path)
 

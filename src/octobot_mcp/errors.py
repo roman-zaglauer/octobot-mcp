@@ -717,3 +717,28 @@ class RestartFailedError(OctoBotAPIError):
     `octobot_mcp.tools.instance_lifecycle.restart_octobot`'s docstring for
     the full verified request/response shape.
     """
+
+
+class EvaluatorScrapeContractBrokenError(OctoBotAPIError):
+    """The `GET /advanced/evaluator_config` HTML page's structure didn't
+    match this server's third Tier-B scrape adapter's expectations
+    (ADR-0009, reversed to GO by explicit user decision; NFR-18).
+
+    Raised the moment the page-wide structural assumption is violated --
+    zero `a.config-element` rows found across ALL FOUR category containers
+    (`ta-`/`social-`/`rt-`/`scripted-evaluator-config-root`) combined, or
+    one of those four container `id`s missing from the page entirely -- so
+    a scrape-contract drift surfaces as a loud, distinct, actionable
+    failure instead of a silent empty/partial evaluator list indistinguishable
+    from "no evaluators exist." Named in parallel to, and never conflated
+    with, `ProfileScrapeContractBrokenError`/`DataFileScrapeContractBrokenError`
+    above -- one domain-specific exception class per adapter, this project's
+    established convention. **Deliberately NOT raised for a single category
+    container legitimately having zero rows** -- confirmed live on this
+    project's own test instance ("Scripted evaluators" renders with zero
+    installed evaluators inside an otherwise-intact container) -- unlike
+    `ProfileScrapeContractBrokenError`'s "zero is always broken" gate, this
+    adapter's fail-loud scope is the whole page, not any single category.
+    See `octobot_mcp.tools.trading_config.list_evaluators` for the exact
+    assumptions this guards.
+    """

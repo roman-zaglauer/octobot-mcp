@@ -25,7 +25,7 @@ tasklist milestones, and additional addenda closing gaps found after v1
 shipped (historical data collection, evaluator config, this server's own
 logging, and a scoped OctoBot-restart capability), are implemented,
 judge-verified, and committed — see `docs/tasklist.md` for the full,
-numbered history. The server registers **46 tools** across profiles, async
+numbered history. The server registers **47 tools** across profiles, async
 backtesting/strategy comparison/historical data collection, portfolio &
 trading, exchanges, tentacle/trading config, and instance lifecycle. See
 "Available tools" below for the full list, or connect a client and read
@@ -91,7 +91,7 @@ claude mcp add octobot --env OCTOBOT_BASE_URL=http://192.168.178.100:5001 -- /ab
 ```
 
 Then run `/mcp` inside a Claude Code session to confirm `octobot` is
-connected and lists 46 tools.
+connected and lists 47 tools.
 
 ## Available tools
 
@@ -113,6 +113,10 @@ connected and lists 46 tools.
   `update_exchange_credentials` (confirm-gated)
 - **Tentacle & trading config**: `get_tentacle_config`,
   `update_tentacle_config`, `update_trading_config`, `update_evaluator_config`,
+  `list_evaluators` (task 19, ADR-0009 — a third Tier-B HTML-scrape read
+  adapter, originally recommended NO-GO then reversed to GO by explicit user
+  decision; enumerates every evaluator's name/activation state/category,
+  closing `update_evaluator_config`'s own companion-read gap),
   `export_logs`, `list_tentacles` (stub — no JSON API exists), `get_logs`
   (stub — no JSON API exists)
 - **Historical data collection** (async — `start_data_collection` reuses
@@ -165,7 +169,7 @@ to whatever the MCP client captures from the subprocess.
 pytest
 ```
 
-346 tests, no live instance required — every test mocks the OctoBot HTTP/
+370 tests, no live instance required — every test mocks the OctoBot HTTP/
 Socket.IO layer. Live verification against a real instance was done
 per-milestone during development (see each milestone's commit message). CI
 runs this same suite on every push and pull request (see the CI badge above).

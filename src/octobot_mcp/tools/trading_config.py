@@ -142,19 +142,64 @@ directly from GitHub:
   direction and the conservative choice) is purely additive -- only the
   evaluators named in `patch` have their activation state touched, every
   other tentacle's state is left exactly as it was.
+
+## `list_evaluators` (task 19, `docs/tasklist.md` item 19, ADR-0009 reversed to GO, FR-32/NFR-18)
+
+A third Tier-B HTML-scrape read adapter (mirroring `octobot_mcp.tools.profiles`/
+`octobot_mcp.tools.data_collection`'s own adapters), added here rather than a
+new module since the tool spec's "Trading config" section places it right
+after `update_evaluator_config` above -- the tool this closes a companion-read
+gap for: `patch`'s keys must be an evaluator's exact class name, and this is
+the only tool in this server that discovers one.
+
+ADR-0009 originally recommended NO-GO on this exact tool (evaluator names are
+OctoBot's own public tentacle catalog, discoverable without this server); the
+user later explicitly asked to build it anyway. See
+`docs/adr/0009-evaluator-discovery-third-tier-b-adapter.md`'s "Status"/
+"Implementation plan" sections for the full live-verified DOM shape this
+adapter implements against (a real fetch of `GET
+http://192.168.178.100:5001/advanced/evaluator_config`, OctoBot 2.1.1,
+performed before this tool was written) -- not re-derived here.
+
+**Confirmed DOM shape**: each evaluator renders as an `<a class="...
+config-element" ... config-type="evaluator_config" config-key=<Name>
+current-value=<Bool> config-value=<Bool> startup-config-value=<Bool> ...>`
+element (`current-value` is a literal `"True"`/`"False"` string, never
+Python-truthy-evaluated directly), nested inside one of four category
+containers, each a stable `id`: `ta-evaluator-config-root` ->
+`"technical_analysis"`, `social-evaluator-config-root` -> `"social"`,
+`rt-evaluator-config-root` -> `"realtime"`, `scripted-evaluator-config-root`
+-> `"scripted"`. `type` is always taken from the container an evaluator's row
+was found inside, never inferred from the evaluator's own class name.
+
+**Fail-loud gate, deliberately scoped differently than
+`ProfileScrapeContractBrokenError`'s "zero is always broken" model**:
+`EvaluatorScrapeContractBrokenError` is raised only if zero `config-element`
+rows are found across ALL FOUR containers combined, or if any of the four
+expected container `id`s is missing from the page entirely -- a single
+category container legitimately having zero rows is NOT an error (confirmed
+live: this project's own test instance's "Scripted evaluators" category has
+zero installed evaluators, rendering an intact but empty container). Do not
+special-case that in a way that changes this gate's whole-page scope.
+
+Read-only, not confirm-gated (ADR-0003).
 """
 
 from typing import Any
 
 import httpx2 as httpx
+from bs4 import BeautifulSoup
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 
 from octobot_mcp.context import get_client
 from octobot_mcp.errors import (
     EvaluatorConfigUpdateRejectedError,
+    EvaluatorScrapeContractBrokenError,
+    OctoBotClientError,
     OctoBotConnectionError,
     OctoBotMalformedResponseError,
+    OctoBotServerError,
     OctoBotTimeoutError,
     TradingConfigUpdateRejectedError,
 )
@@ -166,6 +211,20 @@ _TRADING_UPDATED_CONFIG_KEY = "trading_updated_config"
 _EVALUATOR_CONFIG_KEY = "evaluator_config"
 _EVALUATOR_UPDATED_CONFIG_KEY = "evaluator_updated_config"
 _DEACTIVATE_OTHERS_KEY = "deactivate_others"
+
+#: `list_evaluators` (task 19, ADR-0009): `GET /advanced/evaluator_config`'s
+#: bare page, distinct from the `/config` POST route the two tools above use.
+_EVALUATOR_CONFIG_PAGE_PATH = "/advanced/evaluator_config"
+
+#: The four category container ids ADR-0009's live fetch confirmed, mapped to
+#: the `type` value this tool reports for every evaluator found inside each
+#: one -- never inferred from the evaluator's own class name.
+_EVALUATOR_CATEGORY_CONTAINERS = {
+    "ta-evaluator-config-root": "technical_analysis",
+    "social-evaluator-config-root": "social",
+    "rt-evaluator-config-root": "realtime",
+    "scripted-evaluator-config-root": "scripted",
+}
 
 
 async def _request_raw(
@@ -302,18 +361,15 @@ async def update_evaluator_config(
     `"RSIMomentumEvaluator"`, `"BBMomentumEvaluator"`,
     `"DoubleMovingAverageTrendEvaluator"`, `"MACDMomentumEvaluator"`,
     `"SuperTrendEvaluator"` are real examples confirmed against the OctoBot
-    2.1.1 test instance's default evaluator set. There is currently no tool
-    in this server that enumerates every evaluator/its current activation
-    state (ADR-0009 considered and rejected adding one as a third Tier-B
-    scrape adapter -- see `docs/adr/0009-evaluator-discovery-third-tier-b-
-    adapter.md` for the full trade-off); `get_tentacle_config(name)` does
-    NOT expose activation state either (confirmed live: its `config` field
-    holds only that evaluator's own tunable parameters, e.g. RSI thresholds
-    -- never an enabled/disabled flag). Before calling this tool, obtain
-    evaluator names/current state from the OctoBot web UI's
-    `/advanced/evaluator_config` page directly (a human, or a browser-
-    driving agent, can read it even though this MCP server does not scrape
-    it), from OctoBot's own tentacle documentation, or by asking the user.
+    2.1.1 test instance's default evaluator set. Use this module's own
+    `list_evaluators()` (task 19, ADR-0009 -- reversed to GO by explicit user
+    decision after originally recommending NO-GO here) to discover every
+    evaluator's exact class name and current activation state: its `name`
+    field is exactly the string this tool's `patch` keys must equal, closing
+    the loop structurally. `get_tentacle_config(name)` does NOT expose
+    activation state (confirmed live: its `config` field holds only that
+    evaluator's own tunable parameters, e.g. RSI thresholds -- never an
+    enabled/disabled flag).
 
 
     Output: `{"evaluator_updated_config": <passthrough of OctoBot's own
@@ -357,7 +413,140 @@ async def update_evaluator_config(
     return {_EVALUATOR_UPDATED_CONFIG_KEY: body[_EVALUATOR_UPDATED_CONFIG_KEY]}
 
 
+# --- list_evaluators: third Tier-B scrape adapter (task 19, ADR-0009) -------
+
+
+async def _fetch_evaluator_config_html(client: httpx.AsyncClient) -> str:
+    """Fetch `GET /advanced/evaluator_config`'s raw HTML body.
+
+    Mirrors `octobot_mcp.tools.profiles._fetch_profiles_selector_html`/
+    `octobot_mcp.tools.data_collection._fetch_data_collector_html`'s
+    identically-purposed helper (duplicated, not imported -- this project's
+    established convention). `octobot_mcp.client.request_json` can't be
+    reused: this route renders HTML, not JSON.
+    """
+    try:
+        response = await client.request("GET", _EVALUATOR_CONFIG_PAGE_PATH)
+    except httpx.TimeoutException as exc:
+        raise OctoBotTimeoutError(
+            f"Request to OctoBot timed out: GET {_EVALUATOR_CONFIG_PAGE_PATH}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise OctoBotConnectionError(
+            f"Could not reach OctoBot: GET {_EVALUATOR_CONFIG_PAGE_PATH} ({exc})"
+        ) from exc
+
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} for "
+            f"GET {_EVALUATOR_CONFIG_PAGE_PATH}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot returned client error {response.status_code} for "
+            f"GET {_EVALUATOR_CONFIG_PAGE_PATH}",
+            status_code=response.status_code,
+        )
+    return response.text
+
+
+def _parse_evaluator_row(row: Any, evaluator_type: str) -> dict[str, Any]:
+    """Parse one `a.config-element` row (ADR-0009's exact markup) into one evaluator dict.
+
+    Raises `EvaluatorScrapeContractBrokenError` -- never a partial/best-effort
+    dict -- if this row's `config-key`/`current-value` attributes don't hold
+    the shape ADR-0009's live fetch confirmed, mirroring
+    `octobot_mcp.tools.data_collection._parse_data_files_row`'s per-row
+    fail-loud discipline.
+    """
+    name = row.get("config-key")
+    if not name:
+        raise EvaluatorScrapeContractBrokenError(
+            "An evaluator config-element row is missing its config-key attribute."
+        )
+    current_value = row.get("current-value")
+    if current_value not in ("True", "False"):
+        raise EvaluatorScrapeContractBrokenError(
+            f"Evaluator {name!r}'s current-value attribute is {current_value!r}, "
+            "expected the literal string 'True' or 'False' (confirmed casing, "
+            "see octobot_mcp.tools.trading_config's module docstring)."
+        )
+    return {"name": name, "enabled": current_value == "True", "type": evaluator_type}
+
+
+def _parse_evaluator_config_html(html: str) -> list[dict[str, Any]]:
+    """Parse `/advanced/evaluator_config`'s rendered HTML into evaluator dicts.
+
+    Fail-loud gate (NFR-18), deliberately scoped to the WHOLE page, not any
+    single category -- see this module's docstring: raises
+    `EvaluatorScrapeContractBrokenError` if any of the four expected category
+    container ids is missing from the page entirely, or if zero
+    `config-element` rows are found across all four containers combined. A
+    single category container legitimately having zero rows inside it is not
+    itself an error.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    evaluators: list[dict[str, Any]] = []
+    for container_id, evaluator_type in _EVALUATOR_CATEGORY_CONTAINERS.items():
+        container = soup.find(id=container_id)
+        if container is None:
+            raise EvaluatorScrapeContractBrokenError(
+                f"No element with id={container_id!r} found on "
+                f"{_EVALUATOR_CONFIG_PAGE_PATH}. OctoBot always renders all "
+                "four evaluator category containers, even ones with zero "
+                "evaluators inside -- this means the page structure has "
+                "changed. See octobot_mcp.tools.trading_config's module "
+                "docstring for the last-confirmed OctoBot version."
+            )
+        rows = container.find_all("a", class_="config-element")
+        evaluators.extend(_parse_evaluator_row(row, evaluator_type) for row in rows)
+
+    if not evaluators:
+        raise EvaluatorScrapeContractBrokenError(
+            f"No evaluator config-element rows found across any of the four "
+            f"category containers on {_EVALUATOR_CONFIG_PAGE_PATH}. A real "
+            "OctoBot instance always has at least one evaluator installed "
+            "in some category -- this means the page structure has changed, "
+            "not that zero evaluators exist (a single, legitimately-empty "
+            "category is not itself an error -- see this module's "
+            "docstring)."
+        )
+    return evaluators
+
+
+@with_error_handling
+async def list_evaluators(ctx: Context) -> Any:
+    """List every evaluator OctoBot knows about, including its activation state and category.
+
+    Tier-B (ADR-0009, reversed to GO by explicit user decision -- see this
+    module's docstring for the full verified DOM shape and fail-loud
+    assumptions). Closes `update_evaluator_config`'s own companion-read gap:
+    that tool is unusable without already knowing an evaluator's exact class
+    name and current state. Idempotent, read-only, not confirm-gated
+    (ADR-0003).
+
+    Output: `{"evaluators": [{"name": str, "enabled": bool, "type": str}]}`.
+    `name` is the `config-key` attribute value -- the same string
+    `update_evaluator_config`'s `patch` keys must equal, making the closed
+    loop between these two tools a structural guarantee, not a convention to
+    maintain by hand. `type` is one of `"technical_analysis"`/`"social"`/
+    `"realtime"`/`"scripted"`, taken from whichever category container an
+    evaluator's row was found inside.
+
+    Raises `EvaluatorScrapeContractBrokenError` (NFR-18) only if zero
+    evaluators are found across ALL FOUR category containers combined, or an
+    expected container is missing from the page entirely -- never for a
+    single category legitimately having zero evaluators (confirmed live:
+    this project's own test instance has zero "Scripted evaluators"
+    installed).
+    """
+    html = await _fetch_evaluator_config_html(get_client(ctx))
+    return {"evaluators": _parse_evaluator_config_html(html)}
+
+
 def register(mcp: MCPServer) -> None:
     """Register this module's tools onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
     mcp.tool()(update_trading_config)
     mcp.tool()(update_evaluator_config)
+    mcp.tool()(list_evaluators)

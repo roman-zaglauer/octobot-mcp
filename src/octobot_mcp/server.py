@@ -65,6 +65,10 @@ full list; `update_exchange_credentials` writes real API credentials and is \
 confirm-gated.
 - Tentacle & trading config: `get_tentacle_config`/`update_tentacle_config`/ \
 `update_trading_config`/`update_evaluator_config` read/write configuration; \
+`list_evaluators` enumerates every evaluator OctoBot knows about (name, \
+activation state, category) by scraping OctoBot's own evaluator-config page \
+-- its `name` field is exactly the class-name string `update_evaluator_config`'s \
+`patch` keys must equal, closing that tool's own companion-read gap; \
 `export_logs` exports a \
 real log archive. `list_tentacles`/`get_logs` are honest stubs -- OctoBot \
 has no JSON API for either -- so they always return \
@@ -162,6 +166,12 @@ strategies, even though they share the same underlying activation-config \
 mechanism. Leave it at its default `False` (purely additive) unless you \
 specifically want `patch` to become the exhaustive enabled-evaluator set \
 for this profile.
+- `list_evaluators` (like `list_profiles`/`list_data_files`) works by \
+parsing OctoBot's own evaluator-config web page -- no JSON API exists for \
+evaluator discovery. Its fail-loud error only fires if a WHOLE category is \
+missing or if literally zero evaluators are found across ALL categories \
+combined; one category (e.g. "Scripted evaluators") legitimately having \
+zero installed evaluators is normal on some instances, not an error.
 - `restart_octobot` can NEVER be made fully safe or graceful: OctoBot's own \
 restart mechanism is an abrupt kill-and-re-exec, not a clean shutdown -- no \
 task cancellation or explicit order handling happens first. This is \

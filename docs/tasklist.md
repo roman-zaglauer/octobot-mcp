@@ -444,3 +444,70 @@ global project standards.
     `restart_octobot` refusing outright while a backtest job is running;
     `wait_for_octobot_ready` reporting `ready: false` on a deliberately short
     `timeout_seconds` before the instance has actually come back up.
+
+19. **`list_evaluators` — a third Tier-B scrape adapter, ADR-0009 reversed
+    to GO by explicit user decision.**
+    ADR-0009 originally recommended NO-GO on this exact tool (evaluator
+    names/state are discoverable other ways; a third scrape adapter is a
+    standing maintenance liability). The user later explicitly asked to
+    build it anyway. Traces to FR-32/NFR-18 (requirements doc) and the
+    `list_evaluators` subsection of the tool spec's "Trading config"
+    section, which is the authoritative, implementable contract — implement
+    against that section.
+
+    **Live verification is ALREADY DONE (unlike prior addenda's own "Step 0"
+    pattern) — do not re-derive it.** ADR-0009's "Implementation plan"
+    section records a real fetch of `GET
+    http://192.168.178.100:5001/advanced/evaluator_config` (OctoBot 2.1.1)
+    performed before this tasklist item was written: activation state is
+    confirmed server-rendered (not client-side-JS-applied), the exact row
+    markup (`a.config-element` with `config-type`/`config-key`/
+    `current-value` attributes) and the four category container `id`s
+    (`ta-`/`social-`/`rt-`/`scripted-evaluator-config-root`) are recorded
+    verbatim, and a real legitimate-zero-evaluators-in-one-category case
+    was found (this instance's own "Scripted evaluators" section). A
+    developer should still re-fetch the page once to build/validate a test
+    fixture, but the design's structural assumptions are settled, not open.
+
+    **Implement, in this order:**
+    1. New error class `EvaluatorScrapeContractBrokenError` in
+       `octobot_mcp.errors` (before the module below that raises it, per
+       this project's established ordering convention), following
+       `ProfileScrapeContractBrokenError`/`DataFileScrapeContractBrokenError`'s
+       exact documentation convention.
+    2. `list_evaluators()` — add to `octobot_mcp.tools.trading_config`
+       alongside `update_evaluator_config` (same spec section; the tool
+       spec places it there, not in a new module), or its own small module
+       if the developer judges the BeautifulSoup-scrape machinery doesn't
+       belong next to `trading_config.py`'s request/response helpers —
+       developer's call, consistent with this project's existing
+       module-boundary judgment (see `list_profiles`/`list_data_files` for
+       precedent on where a Tier-B scrape adapter typically lives). Parses
+       `GET /advanced/evaluator_config`'s HTML: selects `a.config-element`
+       (or `a[config-type="evaluator_config"]`) rows within each of the
+       four category containers, extracting `name` (`config-key` attribute),
+       `enabled` (`current-value` attribute, parsed as bool), `type` (fixed
+       per-container: `"technical_analysis"`/`"social"`/`"realtime"`/
+       `"scripted"`). Fail-loud gate (NFR-18): raise
+       `EvaluatorScrapeContractBrokenError` only if zero rows are found
+       across ALL FOUR containers combined, or a container `id` is missing
+       entirely — never for one legitimately-empty category.
+    3. Register the tool (`register_all`), update `README.md`'s tool
+       count/list and `server.py`'s `INSTRUCTIONS` constant, following this
+       project's established practice of keeping both in sync with every
+       new tool.
+    4. Tests, fixture-based (mirroring `list_profiles`/`list_data_files`'s
+       own test structure): a valid fixture with all four categories
+       populated; a fixture mirroring the live instance's own real
+       "Scripted evaluators has zero rows" case, asserting this does NOT
+       raise; a broken fixture (zero rows everywhere, or a missing
+       container), asserting `EvaluatorScrapeContractBrokenError` IS raised;
+       correct `name`/`enabled`/`type` extraction against a fixture with a
+       mix of `True`/`False` `current-value`s across multiple categories.
+
+    **Demo:** agent calls `list_evaluators`, gets back every evaluator on
+    the live instance with correct name/enabled/type, cross-checks one
+    result's `name` by feeding it straight into
+    `update_evaluator_config(patch={<that name>: not <its current enabled>})`
+    and confirms the change — demonstrating the closed loop between the two
+    tools this addendum exists to close.
