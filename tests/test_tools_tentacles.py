@@ -233,10 +233,11 @@ async def test_list_tentacles_returns_structured_unavailable_without_any_http_ca
     assert result == {
         "available": False,
         "reason": result["reason"],
-        "alternative": "get_tentacle_config",
+        "alternative": "get_tentacle_config (or list_evaluators, for evaluators specifically)",
     }
     assert result["available"] is False
     assert isinstance(result["reason"], str) and result["reason"]
+    assert "list_evaluators" in result["reason"]
 
 
 @pytest.mark.anyio

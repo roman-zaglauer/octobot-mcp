@@ -156,7 +156,7 @@ maintain forever. Three fragile HTML-scrape surfaces for a fourteen-plus-
 milestone project whose vast majority of tools are confirmed JSON routes is
 a meaningfully different risk profile than two.
 
-### Recommendation: **NO-GO** for now
+### Recommendation: **NO-GO** for now — **[SUPERSEDED, see Status above]**
 
 Do not add `list_evaluators` as a third Tier-B scrape adapter. Close the gap
 more cheaply (see "If no-go" below). Revisit if real usage shows agents
@@ -164,6 +164,15 @@ repeatedly failing to call `update_evaluator_config` successfully for lack
 of a name/state they could not otherwise obtain — the same "revisit if a
 real need emerges" posture the requirements doc already applies to MCP
 Resources.
+
+**This recommendation was overridden by explicit user decision — `list_evaluators`
+shipped (task 19, `docs/tasklist.md`).** Everything above this point in
+"The go/no-go analysis" remains the accurate record of the original
+analysis and is NOT retracted as reasoning — the trade-off it describes was
+real. Only this specific bottom-line call changed, by direct instruction,
+not because the analysis was found wrong. See "Implementation plan" below
+for what was actually built, and "Consequences of the actual GO decision"
+(after "If no-go") for how those trade-offs played out in practice.
 
 ---
 
@@ -245,76 +254,112 @@ Resources.
   `update_evaluator_config`; a new numbered `docs/tasklist.md` item mirroring
   item 15/16's structure (implementation, fixture-based tests, demo).
 
-## If no-go (the recommended path)
+## If no-go — **[SUPERSEDED — GO was chosen; this section is historical]**
 
-1. **Strengthen `update_evaluator_config`'s own docstring** (a documentation
-   change, not a new tool) to explicitly tell the calling agent how to
-   obtain evaluator names/state without a dedicated discovery tool: name a
-   few real OctoBot evaluator classes as concrete examples (the docstring
-   already does this for `patch`'s shape), and instruct the agent to consult
-   the OctoBot web UI's `/advanced/evaluator_config` page directly (a human
-   or browser-driving agent can read it even though this MCP server cannot
-   reliably scrape it per-instance) or ask the user, before calling this
-   tool blind.
-2. **Extend `list_tentacles`'s existing Tier-C stub** (`tentacles.py`) so its
-   `reason` text explicitly names evaluators as included in the "no JSON
-   enumeration API exists" gap it already discloses for tentacles generally
-   — a one-string edit to an already-existing, already-honest stub, at zero
-   new maintenance surface, rather than a new adapter.
-3. **Cheap, non-blocking follow-up worth a developer's time before either of
-   the above is finalized** (mirroring FR-27's own "verify before adding a
-   duplicate tool" discipline that avoided building
-   `get_available_symbols_for_collection`): confirm whether
-   `get_tentacle_config(<a known evaluator class name>)`'s existing JSON
-   response already exposes that evaluator's activation state. If it does,
-   the real remaining gap is narrower still — just *names*, not *state* —
-   and (1) above should say so explicitly instead of just gesturing at the
-   OctoBot UI.
-4. **Revisit trigger**: reopen this ADR if a user/agent is observed
-   repeatedly failing to call `update_evaluator_config` successfully for
-   lack of a discoverable name or state — concrete evidence of real friction,
-   not a hypothetical one.
+This was the recommended path when NO-GO stood. Steps 1–2 were actually
+applied as interim mitigations before the reversal:
 
-## Consequences
+1. **Strengthen `update_evaluator_config`'s own docstring** — **done**
+   (`src/octobot_mcp/tools/trading_config.py`): names real evaluator classes
+   as examples. Still accurate and useful after the reversal — not removed;
+   its docstring now also points at `list_evaluators` directly (see
+   Implementation plan).
+2. **Extend `list_tentacles`'s existing Tier-C stub** — **done, then found
+   stale and corrected**: this step's original text said evaluator discovery
+   "was also considered and rejected" and pointed callers at the OctoBot web
+   UI. Once `list_evaluators` shipped, that text became actively wrong — an
+   agent calling `list_tentacles` was told a solved problem was unsolved.
+   Fixed post-hoc (`tentacles.py`'s stub now names `list_evaluators`
+   directly as the answer for evaluators specifically, keeping the original
+   "still true for tentacles/trading-modes/strategies generally" framing for
+   everything else). **Lesson for future ADR reversals in this project**:
+   when a NO-GO's own interim mitigation touches a file the eventual GO
+   implementation doesn't also touch, it will NOT get updated as a side
+   effect of shipping the tool — check for this explicitly, don't assume.
+3. **Cheap follow-up** (confirm whether `get_tentacle_config` already
+   exposes activation state) — done during the NO-GO period; confirmed it
+   does not (see the prior Status text, preserved in git history at commit
+   `d0d063f`). Superseded in relevance by `list_evaluators` shipping.
+4. **Revisit trigger** — fired: the user explicitly asked to build it,
+   which is a stronger signal than the "observed repeated agent friction"
+   trigger this step anticipated.
 
-### Positive (of NO-GO)
+## Consequences of the NO-GO decision (historical — superseded, see below for what actually shipped)
+
+### Positive (of NO-GO, as it stood before reversal)
 - No third fragile, OctoBot-UI-version-coupled scrape surface added; the two
   existing Tier-B adapters' maintenance cost does not triple.
 - `update_evaluator_config` remains exactly as useful as it already is
   (real gap, but a pre-existing one this decision doesn't worsen) while
   costing nothing new to build or keep passing.
 
-### Negative (of NO-GO)
+### Negative (of NO-GO, as it stood before reversal)
 - An agent with no prior knowledge of OctoBot's evaluator catalog and no
   human to ask genuinely cannot discover exact class names or current state
   through this MCP server alone — a real, acknowledged capability gap,
   disclosed honestly per this project's own convention (ADR-0006's Tier-C
   precedent), not hidden.
 
-### Neutral
-- If this recommendation is later overridden, the "If go" section above is
-  written to be directly actionable without re-deriving the tool contract,
-  scrape target, or exception name from scratch.
+## Consequences of the actual GO decision (what shipped, task 19)
 
-## Risks
+### Positive
+- The gap above is closed: `list_evaluators` + `update_evaluator_config`
+  form a genuine closed loop (`config-key` in, `config-key` out, no
+  translation), matching `list_data_files`/`delete_data_file`'s precedent.
+- Live-verified end-to-end, including a real flip-and-restore of an
+  evaluator's activation state through both tools together.
+
+### Negative — the NO-GO analysis's core cost concern is now real, not hypothetical
+- This project now has **three** Tier-B HTML-scrape adapters
+  (`list_profiles`, `list_data_files`, `list_evaluators`), each independently
+  coupled to an OctoBot web-UI page's exact rendered structure, each with
+  its own fail-loud contract and fixture to keep passing across future
+  OctoBot version upgrades. The maintenance liability the original NO-GO
+  analysis warned about (Context/"case for NO-GO") is no longer a
+  projection — it is the project's actual current state. A future OctoBot
+  UI change to `/advanced/evaluator_config` will break this adapter exactly
+  as a change to `/profiles_selector` or `/data_collector` would break the
+  other two; there is no reason to expect it more or less fragile than its
+  siblings.
+- The "evaluator names are a discoverable public catalog, so this adapter
+  isn't strictly necessary" premise from the original analysis is now moot
+  for THIS instance's usability, but stays relevant for judging whether a
+  hypothetical fourth Tier-B adapter is worth it in the future — see
+  Alternatives below for how this precedent should (and shouldn't) be read.
+
+## Risks (the shipped adapter's actual ongoing risks — replaces the pre-verification risk table below, kept for record)
+
+| Risk | Severity | Likelihood | Mitigation |
+|---|---|---|---|
+| `/advanced/evaluator_config`'s HTML structure changes in a future OctoBot version (new attribute names, restructured containers, a fifth evaluator category) | Medium | Medium over a long enough horizon (same risk class as `list_profiles`/`list_data_files`) | `EvaluatorScrapeContractBrokenError` fails loud immediately rather than silently returning wrong/partial data; `tests/fixtures/evaluator_config_valid.html` pins the last-known-good structure so a future OctoBot upgrade's breakage is caught by CI, not discovered live |
+| A future maintainer treats this ADR's reversal as precedent for adding a FOURTH Tier-B adapter without going through the same rigor (live verification before design, explicit user sign-off, fail-loud scope decided from real evidence not assumption) | Low | Low | This ADR's own structure (analysis → explicit reversal → live-verified implementation plan) is the template to repeat, not skip |
+| The `list_tentacles`-stub staleness bug found and fixed in this same session (see "If no-go" step 2 above) recurs for some OTHER cross-reference this project hasn't caught yet | Low | Unknown | No systematic check exists for "does shipping tool X leave a stale reference to X's own rejected/superseded state elsewhere in the codebase" — worth a `grep -rn "considered and rejected\|ADR-0009\|ADR-00.." src/` sanity sweep the next time any ADR gets reversed |
+
+<details>
+<summary>Original pre-verification risk table (superseded — all three rows resolved by the live fetch recorded in Status, kept only for historical record)</summary>
+
 | Risk | Severity | Likelihood | Mitigation |
 |---|---|---|---|
 | The "evaluator names are a discoverable public catalog" premise this NO-GO leans on turns out wrong in practice — e.g. an OctoBot instance running third-party/custom evaluator tentacles with names no public catalog lists | Medium | Low | Revisit trigger above; the "If go" design is fully specified and can be implemented on short notice if this surfaces |
 | `/advanced/evaluator_config`'s activation state turns out to be client-side-JS-applied rather than server-rendered (unconfirmed this session — see the blocking verification task in "If go") | High (would make even a future "go" non-viable as scoped) | Unknown | Named explicitly as the first thing a future implementer must confirm, before any other scrape work |
 | This session's live-instance re-verification could not be performed at all (tooling gap: `WebFetch` forces HTTPS, no Chromium binary for Playwright MCP, no shell access for this role) | Low (this ADR's one load-bearing fact was already verified in a prior session and is cited, not invented) | N/A | Flagged plainly here rather than silently presented as freshly confirmed; a future implementer's own verification task supersedes it either way |
 
+</details>
+
 ## Alternatives considered
 - **Build `list_evaluators` now, matching `list_data_files`'s precedent
-  exactly.** Rejected (for now): the "If go" section above is this
-  alternative, fully specified — rejected on the go/no-go analysis above,
-  not because it's poorly defined.
+  exactly.** Originally rejected on the go/no-go analysis above; **this is
+  what was ultimately built** (see Status/Implementation plan) — the
+  rejection was overridden by explicit user decision, not found wrong on
+  its own terms.
 - **Extend `list_tentacles` (Tier C) into a real Tier-B scrape of the
   general tentacle-listing page instead of a narrow evaluator-only one.**
-  Rejected: broader scope than the actual gap (ADR-0006's "Alternatives
-  considered" already rejected scraping every HTML-only page for the same
-  reason), and would still need the same client-side-vs-server-rendered
-  verification risk this ADR flags, for a larger page.
+  Still rejected, unaffected by the reversal above: broader scope than the
+  actual gap (ADR-0006's "Alternatives considered" already rejected
+  scraping every HTML-only page for the same reason), and would still need
+  the same client-side-vs-server-rendered verification this ADR's live
+  fetch had to do, for a much larger page.
 - **Do nothing — leave `update_evaluator_config`'s docstring unchanged.**
-  Rejected: costs nothing to improve the docstring (step 1 of "If no-go"),
-  so leaving a known, cheaply-fixable gap fully undocumented has no
-  offsetting benefit.
+  Still rejected, unaffected by the reversal above: costs nothing to
+  improve the docstring, so leaving a known, cheaply-fixable gap fully
+  undocumented would have had no offsetting benefit even under NO-GO.

@@ -331,15 +331,16 @@ _LIST_TENTACLES_UNAVAILABLE: dict[str, Any] = {
         "rejected (see docs/adr/0006-read-model-acquisition-strategy.md's "
         "'Alternatives considered') as multiplying fragile, "
         "OctoBot-UI-version-coupled surface for marginal value. This "
-        "includes evaluators specifically: a dedicated third scrape "
-        "adapter to enumerate evaluators/their activation state for "
-        "`update_evaluator_config` was also considered and rejected, same "
-        "reasoning (see docs/adr/0009-evaluator-discovery-third-tier-b-"
-        "adapter.md) -- obtain evaluator class names/state from the "
-        "OctoBot web UI's `/advanced/evaluator_config` page, OctoBot's own "
-        "tentacle documentation, or the user."
+        "remains true for tentacles/trading modes/strategies generally --"
+        "for those, obtain names from OctoBot's own tentacle documentation "
+        "or the user. EVALUATORS are the one exception: a dedicated Tier-B "
+        "adapter for exactly that gap was considered and initially "
+        "rejected on this same reasoning (docs/adr/0009-evaluator-"
+        "discovery-third-tier-b-adapter.md), then built anyway by explicit "
+        "user decision -- call `list_evaluators()` for every evaluator's "
+        "name/activation state/category, not this stub."
     ),
-    "alternative": "get_tentacle_config",
+    "alternative": "get_tentacle_config (or list_evaluators, for evaluators specifically)",
 }
 
 _GET_LOGS_UNAVAILABLE: dict[str, Any] = {
