@@ -55,6 +55,26 @@ Independent backtesting's own `profile_id`-scoped path
 activation state from the profile's files, but does not touch
 `_TENTACLE_CONFIG_CACHE` — it does not fully solve this by itself.
 
+**Post-shipping field observation — this may be a broader pattern than one
+cache (not yet root-caused in source, flagged honestly rather than silently
+folded into the fix above):** after this capability shipped, the user
+reported the same class of symptom — a `profile_id`-targeted backtest not
+reflecting a config change — on a completely different mechanism,
+`DailyTradingMode.required_strategies_min_count` (a trading-mode-level
+field, not an evaluator-level one, so NOT the same `_TENTACLE_CONFIG_CACHE`
+code path traced above), confirmed across two separate bots/datasets.
+Order-execution parameters (position sizing, stop-loss/take-profit) were
+NOT affected — only strategy-COMPOSITION parameters (which/how-many
+evaluators or strategies must agree) were. This suggests OctoBot's backtest
+engine may have a broader limitation with `profile_id`-scoped composition
+parameters than the one specific cache this ADR fixes — `restart_octobot`
+is confirmed to fix the evaluator-requirements case, but is **not**
+confirmed to fix every strategy-composition tuning case. Nobody has traced
+`required_strategies_min_count`'s own code path in source yet; treat this as
+an open empirical finding, not a resolved root cause, until someone does.
+See `server.py`'s `INSTRUCTIONS` (Known OctoBot-side quirks) for the
+user-facing version of this caveat.
+
 **What the restart route actually does** (verified this session):
 `GET /wait_reboot?reboot=true[&trading_delay_info=&next=&onboarding=]`
 (`packages/tentacles/Services/Interfaces/web_interface/controllers/reboot.py`)

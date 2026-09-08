@@ -171,6 +171,19 @@ could remove. `wait_for_octobot_ready`'s default `timeout_seconds`/ \
 empirically measured against a real restart -- override them if you have \
 your own measurement, and do not assume "ready" (HTTP reachable) means the \
 tentacle-config cache this capability exists to clear is actually cleared.
+- Restarting fixes the SPECIFIC `_TENTACLE_CONFIG_CACHE` bug behind \
+evaluator-requirements tuning (see above), but this is NOT confirmed to be \
+a universal fix for every strategy-COMPOSITION tuning case: the same \
+symptom (a `profile_id`-targeted backtest not reflecting a config change) \
+has independently been observed on an unrelated trading-mode-level field \
+(`DailyTradingMode.required_strategies_min_count`), suggesting a broader \
+OctoBot backtest-engine limitation, not a single isolated cache. \
+Order-execution parameters (position sizing, stop-loss/take-profit levels) \
+are unaffected and DO apply correctly in a `profile_id`-targeted backtest. \
+Strategy-composition parameters (which/how-many evaluators or strategies \
+must agree) should be treated as suspect until independently reverified for \
+that specific mechanism -- do not assume `restart_octobot` resolves every \
+future case just because it resolved this one.
 
 ## Safety
 
