@@ -20,13 +20,17 @@ OctoBot's web UI yourself. It is not a trading strategy, a replacement for
 OctoBot itself, or a multi-instance fleet manager (see "Design docs" below
 for what's explicitly out of scope and why).
 
-**Status: v1 complete.** All 14 tasklist milestones (plus three small
-addenda closing gaps found during review) are implemented, judge-verified,
-and committed. The server registers **38 tools** across profiles, async
-backtesting/strategy comparison, portfolio & trading, exchanges, and
-tentacle/trading config. See "Available tools" below for the full list, or
-connect a client and read `mcp.instructions`/each tool's own description —
-both are written to stand alone without this file.
+**Status: v1 complete, plus several post-v1 addenda.** All 14 original
+tasklist milestones, and additional addenda closing gaps found after v1
+shipped (historical data collection, evaluator config, this server's own
+logging, and a scoped OctoBot-restart capability), are implemented,
+judge-verified, and committed — see `docs/tasklist.md` for the full,
+numbered history. The server registers **46 tools** across profiles, async
+backtesting/strategy comparison/historical data collection, portfolio &
+trading, exchanges, tentacle/trading config, and instance lifecycle. See
+"Available tools" below for the full list, or connect a client and read
+`mcp.instructions`/each tool's own description — both are written to stand
+alone without this file.
 
 ## Requirements
 
