@@ -194,6 +194,25 @@ resolved; the other two remain open):**
   observing at least one genuinely failed poll before a later success
   counts as `ready: true`. See the tool's own updated docstring
   (`src/octobot_mcp/tools/instance_lifecycle.py`) for the full account.
+- **A second, related bug found later, from a live user session (not this
+  dense-polling round) — the first fix overcorrected into a false
+  negative.** `wait_for_octobot_ready` polled 31 times over a full 60s
+  timeout and reported `ready: false`; a retry also reported not-ready
+  after ~3 minutes total; a direct, ad-hoc `GET /api/version` issued right
+  after got an immediate, healthy response — the server was reachable the
+  entire time either call ran. Cause: requiring the observed-failure check
+  above to be satisfied WITHIN the same call breaks down once the call is
+  invoked (e.g. a retry after a prior call's own timeout) after the server
+  has already fully recovered — every poll in that call succeeds,
+  `observed_unreachable` never flips, and the loop spins for the whole
+  `timeout_seconds` before dishonestly reporting `ready: false`. Fixed:
+  `wait_for_octobot_ready` now also trusts a success once enough
+  wall-clock time has passed since THAT CALL started (`_GRACE_PERIOD_
+  SECONDS`, margin above the confirmed ~2.1s pre-kill delay) — a proxy for
+  "the pre-kill grace window has already elapsed" that doesn't require the
+  tool to remember when `restart_octobot` was actually called (it has no
+  such memory, and none was added). See the tool's own updated docstring
+  for the full account.
 - **Still open at that point**: whether "ready" (now correctly meaning
   "observed a real outage, then reachable again") coincides with "the
   tentacle-config cache is actually clear." That round did not run a
@@ -529,6 +548,7 @@ Following this project's one-class-per-domain-failure convention
 | Abrupt kill-and-reexec with no graceful shutdown is inherent to OctoBot's own restart mechanism and cannot be made safe by this server | High | Certain (whenever the tool is used) | Confirm-gated (decision 2) with a risk-scaled reason string for `LIVE` profiles (decision 3); OctoBot's own changelog/source evidence (Context) shows restart-during-live-trading is a designed, hardened scenario with exchange-side reconciliation on boot, which narrows but does not eliminate this risk — stated plainly in the tool description as an accepted, unremovable trade-off, not engineered around, because it cannot be |
 | `wait_for_octobot_ready`'s "ready" (HTTP-reachable after a confirmed outage) does NOT coincide with "the tentacle-config cache is actually clear" — CONFIRMED, not just suspected | High — this is the capability's entire stated purpose, and it does not hold | Certain (confirmed on two independent OctoBot instances/sessions) | None available yet — this ADR's root-cause theory (`_TENTACLE_CONFIG_CACHE`) was traced and ruled out as the (sole) blocker for at least one tested mechanism (`SimpleStrategyEvaluator`'s `default_config`/`required_evaluators`, which turned out to be static per-tentacle config, not activation-dependent at all); the real blocker is unidentified. See Context's "Negative finding" and "Alternatives considered"'s removal-vs-keep discussion |
 | A naive "first successful poll wins" implementation of `wait_for_octobot_ready` can report a false `ready: true` by racing OctoBot's own ~2s pre-kill grace window and hitting the OLD, not-yet-killed process — **found live, twice, and fixed** | Was High before the fix (would have silently defeated the whole capability); now Resolved | Was Certain given the confirmed ~2s scheduling delay; now N/A | Fixed: `wait_for_octobot_ready` now requires observing at least one genuinely failed poll before a later success counts as `ready: true` (`src/octobot_mcp/tools/instance_lifecycle.py`, regression test in `tests/test_tools_instance_lifecycle.py`) |
+| That same fix overcorrected: `wait_for_octobot_ready` invoked once the server has already fully recovered (e.g. a retry after a prior call's own timeout) sees every poll succeed, never observes a failure, and spins for the whole `timeout_seconds` before reporting a false `ready: false` — **found live (user session, 31 polls/60s timeout, then a retry, both false), and fixed** | Was Medium (an honestly-reported but wrong result, not a silent one); now Resolved | Was Certain whenever this call starts after recovery already completed; now N/A | Fixed: also trusts a success once enough wall-clock time has passed since THIS call started (`_GRACE_PERIOD_SECONDS`, margin above the confirmed ~2.1s pre-kill delay) — a proxy for "the grace window has elapsed" that needs no memory of when `restart_octobot` was called (`src/octobot_mcp/tools/instance_lifecycle.py`, regression test in `tests/test_tools_instance_lifecycle.py`) |
 | A backtest/data-collection job starts in the narrow window between the job-store check and the actual reboot call | Low | Low (single-client assumption, A3) | Accepted residual risk given A3; revisit if multi-instance/multi-client support is ever added (NFR-11) |
 | `/wait_reboot`'s HTML response shape/status code changes in a future OctoBot version | Low | Low | Only the HTTP status code is inspected, never the HTML body — minimal coupling surface; document the last-verified OctoBot version (2.1.1) alongside the tool, per this project's existing scrape-adapter convention |
 | Live-trading blind-spot window duration is unmeasured, so an agent confirming `restart_octobot` against a `LIVE` profile is confirming a real but unquantified risk | Medium | Medium (whenever a caller confirms restart against a `LIVE` profile) | `[UNVERIFIED]`; the `LIVE`-specific confirmation reason string (decision 3) names this gap explicitly rather than implying the risk is fully characterized; a future measurement task (trigger one real restart during a real-trading session) would let this be stated as a concrete bound instead of an open unknown |

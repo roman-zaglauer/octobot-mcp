@@ -43,6 +43,21 @@ verification":
   genuinely failed poll before a later success counts as `ready: true` --
   see that function's own docstring for the full account and
   `tests/test_tools_instance_lifecycle.py`'s regression test.
+- **A second, related bug found later, from a live user session (not the
+  dense-polling round above)**: that first fix overcorrected. Requiring
+  THIS call to observe its own failed poll means a call invoked once the
+  server has ALREADY fully recovered (e.g. a retry after a prior call's
+  own timeout) sees every poll succeed, never flips `observed_unreachable`,
+  and spins for the entire `timeout_seconds` before dishonestly reporting
+  `ready: false` -- even though the server was reachable the whole time (a
+  direct ad-hoc `GET /api/version` issued right after got an immediate,
+  healthy response). Fixed by also trusting a success once enough
+  wall-clock time has passed since THIS call started (`_GRACE_PERIOD_
+  SECONDS`, margin above the confirmed ~2.1s pre-kill delay) -- a proxy for
+  "the pre-kill grace window has already elapsed" that doesn't require
+  remembering when `restart_octobot` was actually called. See
+  `wait_for_octobot_ready`'s own docstring for the full account and
+  `tests/test_tools_instance_lifecycle.py`'s regression test.
 - The polling route (`_POLL_ROUTE_PATH`, `GET /api/version`) was picked for
   being this project's own already-established "is OctoBot up at all"
   smoke-test route -- every prior milestone's own live-verification session
@@ -107,6 +122,15 @@ DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 #: The lightweight `GET` route `wait_for_octobot_ready` polls -- see this
 #: module's docstring for why this route, specifically, was chosen.
 _POLL_ROUTE_PATH = "/api/version"
+
+#: How long, from the START of a given `wait_for_octobot_ready` call, a
+#: success is treated as possibly still the stale pre-kill process rather
+#: than trustworthy on its own -- margin above the confirmed ~2.1s
+#: `restart_bot(delay=2)` pre-kill window (this module's docstring's "Step
+#: 0" section). See `wait_for_octobot_ready`'s own docstring for the second
+#: bug this constant fixes (a false `ready: false` when the call starts
+#: after the server has already fully recovered).
+_GRACE_PERIOD_SECONDS = 3.0
 
 #: `GET /wait_reboot?reboot=true` (`Services/Interfaces/web_interface/
 #: controllers/reboot.py`, confirmed against source, ADR-0010 Context): an
@@ -368,7 +392,39 @@ async def wait_for_octobot_ready(
     at least one prior poll in this same call has failed, so `ready: true`
     now means "the server went down and came back," not just "answered."
 
-    **"Ready" (even with the fix above) still means ONLY "the HTTP server
+    **Second correctness fix, for a false NEGATIVE this first fix
+    introduced: requiring THIS call to observe its own failed poll is not
+    sufficient on its own.** Reported live: a call polled 31 times over a
+    full 60s timeout and reported `ready: false`; a retry also reported
+    not-ready after ~3 minutes total; a direct, ad-hoc `GET /api/version`
+    issued right after got an immediate, healthy response -- the server was
+    reachable the entire time either call ran. Root cause: if this function
+    is invoked (e.g. a retry after a prior call's own timeout, or simply
+    invoked "too late" relative to the restart) once the server has
+    ALREADY fully recovered, every single poll in that call succeeds --
+    `observed_unreachable` never flips to `True`, so the "trust a success"
+    branch never fires, and the loop spins on an already-healthy server for
+    the entire `timeout_seconds` before dishonestly reporting `ready:
+    false`. This function has no memory of when `restart_octobot` was
+    actually called, so it cannot directly check "has the ~2.1s pre-kill
+    window already elapsed" -- but it CAN check how much wall-clock time has
+    elapsed since THIS call itself started, which is a reliable proxy for
+    the one calling pattern this tool is designed around (`restart_octobot`
+    documents "Call wait_for_octobot_ready() next" as the very next step).
+    Fixed via `_GRACE_PERIOD_SECONDS` (3.0s, margin above the confirmed
+    ~2.1s pre-kill delay): a success is now trusted as `ready: true` either
+    because a prior poll in this call already failed (the first fix,
+    unchanged), OR because enough wall-clock time has passed since this
+    call started that any stale pre-kill process from a hypothetical
+    just-triggered restart would already be dead. A caller invoking this
+    function immediately after `restart_octobot` is still protected (the
+    first ~3s of elapsed time cannot trust an immediate success on its own,
+    exactly as before); a caller invoking it once the server is already
+    healthy now gets an honest, prompt `ready: true` instead of spinning
+    for the full timeout. See `tests/test_tools_instance_lifecycle.py`'s
+    regression test for both bugs.
+
+    **"Ready" (even with the fixes above) still means ONLY "the HTTP server
     answered a request again after a confirmed outage" -- nothing more, and
     this is now a CONFIRMED gap, not a suspected one.** A follow-up live
     test checked `SimpleStrategyEvaluator`'s `default_config`/
@@ -407,11 +463,11 @@ async def wait_for_octobot_ready(
     while True:
         attempts += 1
         reachable = await _is_octobot_reachable(client)
-        if reachable and observed_unreachable:
-            return {"ready": True, "elapsed_seconds": time.monotonic() - start, "attempts": attempts}
+        elapsed = time.monotonic() - start
+        if reachable and (observed_unreachable or elapsed >= _GRACE_PERIOD_SECONDS):
+            return {"ready": True, "elapsed_seconds": elapsed, "attempts": attempts}
         if not reachable:
             observed_unreachable = True
-        elapsed = time.monotonic() - start
         if elapsed >= timeout_seconds:
             return {"ready": False, "elapsed_seconds": elapsed, "attempts": attempts}
         await asyncio.sleep(min(poll_interval_seconds, timeout_seconds - elapsed))

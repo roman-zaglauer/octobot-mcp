@@ -329,3 +329,37 @@ async def test_wait_for_octobot_ready_does_not_report_ready_on_first_success_wit
     result = await wait_for_octobot_ready(ctx, timeout_seconds=0.05, poll_interval_seconds=0.01)
     assert result["ready"] is False
     assert result["attempts"] >= 1
+
+
+@pytest.mark.anyio
+async def test_wait_for_octobot_ready_reports_ready_when_server_was_already_up_the_whole_call(monkeypatch):
+    # Regression test for a SECOND, real bug (reported live: 31 polls over a
+    # full 60s timeout, `ready: false`, while an ad-hoc `GET /api/version`
+    # issued right after got an immediate, healthy response -- the server
+    # was reachable the entire time). Root cause: the fix above requires
+    # THIS call to observe at least one failed poll before trusting a later
+    # success -- but if `wait_for_octobot_ready` is invoked (e.g. a retry
+    # after a prior call's own timeout) once the server has ALREADY fully
+    # recovered, every single poll in this call succeeds, `observed_
+    # unreachable` never flips, and the loop spins for the entire
+    # `timeout_seconds` before dishonestly reporting `ready: false`.
+    #
+    # Fixed via `_GRACE_PERIOD_SECONDS`: a success is trusted either after
+    # an observed prior failure (the first bug's fix, unchanged) OR once
+    # enough wall-clock time has passed since THIS call started that any
+    # stale pre-kill process from the documented ~2.1s grace window would
+    # already be gone -- without needing to remember when `restart_octobot`
+    # was actually called. `_GRACE_PERIOD_SECONDS` is monkeypatched down so
+    # this test doesn't need to actually sleep for multiple real seconds.
+    import octobot_mcp.tools.instance_lifecycle as instance_lifecycle_module
+
+    monkeypatch.setattr(instance_lifecycle_module, "_GRACE_PERIOD_SECONDS", 0.03)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"version": "OctoBot 2.1.1"})
+
+    ctx = make_ctx(httpx.MockTransport(handler))
+    result = await wait_for_octobot_ready(ctx, timeout_seconds=1.0, poll_interval_seconds=0.01)
+
+    assert result["ready"] is True
+    assert result["attempts"] >= 1
