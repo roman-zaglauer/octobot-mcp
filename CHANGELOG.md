@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-21
+
+### Fixed
+- `wait_for_octobot_ready` could report `ready: false` even though
+  OctoBot's HTTP server was fully reachable the entire time it polled.
+  The prior fix ([1.0.0]'s `51e6455`, see ADR-0010) required this call to
+  observe one of its own failed polls before trusting a success, to guard
+  against a stale pre-kill process answering right after
+  `restart_octobot`. That overcorrected: a call invoked once the server
+  had *already* fully recovered (e.g. a retry issued after a previous
+  call's own timeout) saw every poll succeed, so `observed_unreachable`
+  never flipped, the "trust a success" branch never fired, and the call
+  spun for the entire `timeout_seconds` before dishonestly reporting
+  `ready: false` — confirmed live: a direct ad-hoc `GET /api/version`
+  issued right after such a call got an immediate, healthy response. Now
+  also trusts a success once enough wall-clock time
+  (`_GRACE_PERIOD_SECONDS`, 3.0s — margin above the confirmed ~2.1s
+  pre-kill delay) has passed since the call itself started, so a caller
+  invoking it immediately after `restart_octobot` is still protected
+  while a caller invoking it once the server is already healthy now gets
+  a prompt, honest `ready: true` instead of spinning for the full timeout
+  ([8f17cfa](https://github.com/roman-zaglauer/octobot-mcp/commit/8f17cfae773b15ba9e0b4013df3ba91bd780c3f9)).
+
 ## [1.0.1] - 2026-09-08
 
 ### Fixed
@@ -199,6 +222,7 @@ behavior worth knowing about.)
 - Enabled GitHub private vulnerability reporting as the primary security
   contact path (`.github/SECURITY.md`).
 
-[Unreleased]: https://github.com/roman-zaglauer/octobot-mcp/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/roman-zaglauer/octobot-mcp/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/roman-zaglauer/octobot-mcp/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/roman-zaglauer/octobot-mcp/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/roman-zaglauer/octobot-mcp/releases/tag/v1.0.0
