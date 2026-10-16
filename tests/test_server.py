@@ -53,7 +53,31 @@ Task 19 (item 19, ADR-0009 -- originally recommended NO-GO, reversed to GO
 by explicit user decision, FR-32/NFR-18) adds `list_evaluators` (not
 confirm-gated, a third Tier-B HTML-scrape read adapter, `GET
 /advanced/evaluator_config`), closing `update_evaluator_config`'s own
-companion-read gap.
+companion-read gap. Milestone 20 (item 20, ADR-0011, a genuinely new-scope
+addendum found via a live UI audit) adds `get_portfolio_snapshot`/
+`get_evaluation_matrix` (neither confirm-gated, a fourth/fifth Tier-B
+scrape adapter pair).
+Task 21 (item 21, ADR-0012, the accounts/profile-global-config addendum)
+adds eleven tools: `get_exchanges`/`add_exchange`/`remove_exchange`/
+`update_exchange_trading_mode` (`exchanges.py`; `add_exchange`/
+`remove_exchange` confirm-gated, `get_exchanges`/`update_exchange_trading_mode`
+not), `get_interfaces`/`update_interface_config` (new module
+`interfaces.py`; `update_interface_config` CONDITIONALLY confirm-gated --
+NFR-22/23, the one tool in this project whose gating is per-call, not
+per-tool), `get_notification_routing`/`update_notification_routing` (same
+module, neither gated), and `set_real_trading_enabled` (`profiles.py`,
+confirm-gated BOTH directions -- finally closes requirements doc open
+question #5), `get_profile_currencies`/`update_profile_currencies`
+(`profiles.py`, neither gated). Milestone 22 (item 22, ADR-0013,
+FR-43..FR-45/NFR-24, a genuinely new-scope addendum reusing the existing
+tentacle-config mechanism, not a new rules-engine subsystem) adds
+`get_automations`/`update_automations` (neither confirm-gated --
+passthrough reads/writes of the current profile's automation config) and
+`start_automations`/`reset_automations_to_default` (**both confirm-gated**,
+under two distinct criteria: `start_automations` under a brand-new
+"activates autonomous, ongoing behavior" category,
+`reset_automations_to_default` under the ordinary irreversible-deletion
+criterion already used by `clear_*_history`/`delete_data_file`).
 Each milestone updates this same assertion to the new -- expected -- tool
 set instead of keeping a now-false invariant (the pattern milestone 3
 itself established over milestone 1's `test_server_lists_zero_tools`). See
@@ -61,7 +85,9 @@ itself established over milestone 1's `test_server_lists_zero_tools`). See
 `test_tools_profiles_gated.py`/`test_tools_jobs.py`/`test_tools_backtesting.py`/
 `test_tools_tentacles.py`/`test_tools_trading_config.py`/
 `test_tools_portfolio_trading_actions.py`/`test_tools_data_collection.py`/
-`test_tools_instance_lifecycle.py`
+`test_tools_instance_lifecycle.py`/`test_tools_exchanges_accounts_config.py`/
+`test_tools_interfaces.py`/`test_tools_profiles_accounts_config.py`/
+`test_tools_automations.py`
 for per-tool behavior and `test_server_tools_integration.py` for an
 end-to-end call through this same `mcp` wiring.
 
@@ -77,7 +103,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_TASK_20_TOOL_NAMES = {
+EXPECTED_MILESTONE_22_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -127,6 +153,21 @@ EXPECTED_TASK_20_TOOL_NAMES = {
     "list_evaluators",
     "get_portfolio_snapshot",
     "get_evaluation_matrix",
+    "get_exchanges",
+    "add_exchange",
+    "remove_exchange",
+    "update_exchange_trading_mode",
+    "get_interfaces",
+    "update_interface_config",
+    "get_notification_routing",
+    "update_notification_routing",
+    "set_real_trading_enabled",
+    "get_profile_currencies",
+    "update_profile_currencies",
+    "get_automations",
+    "update_automations",
+    "start_automations",
+    "reset_automations_to_default",
 }
 
 
@@ -143,9 +184,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_task_20_tools(client: Client):
+async def test_server_lists_the_milestone_22_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_TASK_20_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_MILESTONE_22_TOOL_NAMES
 
 
 @pytest.mark.anyio

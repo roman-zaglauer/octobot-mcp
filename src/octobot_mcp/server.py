@@ -41,7 +41,14 @@ rotated backups), overridable via `OCTOBOT_MCP_LOG_FILE`/`OCTOBOT_MCP_LOG_LEVEL`
 - Profiles: `list_profiles`/`get_profile` discover ids and names; \
 `create_profile`/`update_profile`/`select_profile`/`export_profile` manage \
 them; `delete_profile`/`convert_profile_to_live` are destructive/high-risk \
-and confirm-gated (see Safety).
+and confirm-gated (see Safety). `set_real_trading_enabled` (task 21, \
+ADR-0012, confirm-gated BOTH directions) finally toggles real-vs-simulated \
+trading -- the gap `convert_profile_to_live` explicitly does NOT fill -- \
+and forces a full OctoBot restart (see Known OctoBot-side quirks below). \
+`get_profile_currencies`/`update_profile_currencies` (task 21, neither \
+gated) read/write per-profile traded-currency enable state and pair \
+selection -- genuinely distinct from `update_profile`'s own `config` field, \
+which OctoBot silently ignores.
 - Backtesting & strategy comparison (asynchronous -- see next section): \
 `start_backtest`, `compare_strategies`, `get_job_status`, `list_jobs`, \
 `cancel_job`, `get_job_result`.
@@ -67,7 +74,21 @@ total-value time series).
 - Exchanges: currency/symbol lookups and `check_accounts_compatible` are \
 reads; `get_exchange_details` returns only ONE exchange's details, never a \
 full list; `update_exchange_credentials` writes real API credentials and is \
-confirm-gated.
+confirm-gated. `get_exchanges` (task 21, ADR-0012) lists EVERY configured \
+exchange's enable state/credential status, closing that gap; \
+`add_exchange`/`remove_exchange` are confirm-gated (the latter also deletes \
+saved credentials, not just a config entry); `update_exchange_trading_mode` \
+(spot/futures + enabled) is not confirm-gated -- a flagged judgment call, \
+not a silent decision (ADR-0012).
+- Interfaces & notifications (task 21, ADR-0012): `get_interfaces` reads \
+every configured service (Telegram/Web/etc.) with credential-shaped fields \
+redacted; `update_interface_config` is CONDITIONALLY confirm-gated -- only \
+required when the patch touches a field matching a secret-suffix list \
+(`token`/`secret`/`password`/`api-key`/`api-secret`/`api-password`/ \
+`api-hash`/`client-secret`), the one tool in this project gated per-call \
+rather than per-tool. `get_notification_routing`/`update_notification_routing` \
+(which event categories notify, and which interfaces receive them) are \
+neither gated.
 - Tentacle & trading config: `get_tentacle_config`/`update_tentacle_config`/ \
 `update_trading_config`/`update_evaluator_config` read/write configuration; \
 `list_evaluators` enumerates every evaluator OctoBot knows about (name, \
@@ -91,6 +112,18 @@ descriptor and only clears it on a full restart); `wait_for_octobot_ready` \
 polls for the instance becoming reachable again afterward, never blocking \
 past its own timeout and never claiming more than "the HTTP server \
 answered" (see Known OctoBot-side quirks below).
+- Automations (ADR-0013 -- reuses the same tentacle-config mechanism as \
+`update_tentacle_config`, not a new rules-engine subsystem): `get_automations`/ \
+`update_automations` read/write the current profile's automation \
+configuration, passthrough-only (never reshaping OctoBot's own schema); \
+`start_automations` (confirm-gated under a NEW category -- "activates \
+autonomous, ongoing behavior" -- distinct from every other gated tool's \
+destructive/credential/live-trading reasoning) activates the saved \
+configuration; `reset_automations_to_default` (confirm-gated under the \
+ordinary irreversible-deletion criterion) factory-resets it. Both `start_automations`/ \
+`reset_automations_to_default` also restart automations and refuse outright \
+if an active backtest/data-collection job is running, mirroring \
+`restart_octobot`'s own job-store check.
 
 ## The async job pattern (backtesting & comparison)
 
@@ -241,13 +274,31 @@ UNVERIFIED whether OctoBot ever paginates this table server-side on a \
 heavily-configured instance (requirements doc open question #16); only 8 \
 rows were observed live. Treat a very large `entries` list as a signal to \
 double-check completeness, not an assumed-complete snapshot.
+- `set_real_trading_enabled` (task 21, ADR-0012) ALSO forces a full \
+OctoBot restart -- the exact same abrupt kill-and-re-exec mechanism \
+`restart_octobot` wraps (confirmed against source: both routes \
+unconditionally schedule the identical underlying restart call), with the \
+same "briefly unreachable, no graceful shutdown first" caveat described \
+above. Call `wait_for_octobot_ready()` after using it, same as after \
+`restart_octobot`.
+- `get_exchanges`' `exchange_type` field is always `null` on this OctoBot \
+version -- confirmed live that `/accounts`' exchange card renders no \
+`exchange-type` element at all (only `/profile`'s own exchange tab does); \
+not a scrape gap, a genuine absence on this page.
 
 ## Safety
 
 Any tool that destroys data, writes exchange credentials, enables live/ \
 real-money trading, or disrupts the whole running instance (`restart_octobot`) \
-requires an explicit `confirm=true` argument. Omitting \
-it (or passing `confirm=false`) performs NO action and returns a normal \
+requires an explicit `confirm=true` argument. `start_automations` adds a \
+FOURTH gating category (ADR-0013): it activates autonomous, ongoing bot \
+behavior with no further per-action confirmation, which is neither \
+destructive, credential-exposing, nor a live-trading toggle, but still \
+requires `confirm=true` for the same reason -- read its refusal's reason \
+text, which is deliberately worded differently from \
+`reset_automations_to_default`'s own (the latter IS the ordinary \
+irreversible-deletion criterion, like `clear_*_history`). Omitting `confirm` \
+(or passing `confirm=false`) performs NO action and returns a normal \
 (non-error) structured refusal explaining why and how to proceed -- read \
 that refusal before blindly retrying with `confirm=true`. Routine trading \
 actions (`cancel_order`, `close_position`) are deliberately NOT \
@@ -256,7 +307,15 @@ everyday operations for a trading bot, not rare/catastrophic mistakes. \
 `restart_octobot`'s refusal reason string is more detailed when the \
 currently selected profile is LIVE (or its type is inconclusive) than when \
 it is SIMULATOR -- read it either way; `confirm=true` is the SAME gate in \
-both cases, never a hard block.\
+both cases, never a hard block. `set_real_trading_enabled` is confirm-gated \
+in BOTH directions (enabling names the real-money consequence explicitly; \
+disabling is gated only for the forced-restart disruption). \
+`add_exchange`/`remove_exchange` are confirm-gated like \
+`update_exchange_credentials` above. `update_interface_config` is the ONE \
+tool in this project gated CONDITIONALLY, per-call rather than per-tool: \
+only a patch touching a credential-shaped field (matching a fixed \
+secret-suffix list) requires `confirm=true` -- a patch touching only \
+non-credential fields (e.g. a port number) proceeds without it.\
 """
 
 # The MCP SDK's own `MCPServer.__init__` unconditionally calls its internal

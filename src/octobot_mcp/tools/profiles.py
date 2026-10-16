@@ -135,8 +135,9 @@ from bs4 import BeautifulSoup
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 
-from octobot_mcp.context import get_client
+from octobot_mcp.context import get_client, get_job_store
 from octobot_mcp.errors import (
+    ConfigElementScrapeContractBrokenError,
     OctoBotClientError,
     OctoBotConnectionError,
     OctoBotMalformedResponseError,
@@ -149,6 +150,13 @@ from octobot_mcp.errors import (
     ProfileScrapeContractBrokenError,
     ProfileSelectionFailedError,
     ProfileUpdateRejectedError,
+)
+from octobot_mcp.jobs import JobStore
+from octobot_mcp.tools._config_scrape import (
+    find_config_container,
+    find_entities_with_config_elements,
+    scrape_config_elements,
+    strip_prefix,
 )
 from octobot_mcp.tools._shared import (
     _parse_content_disposition_filename,
@@ -1198,6 +1206,253 @@ async def convert_profile_to_live(ctx: Context, profile_id: str, confirm: bool =
     return {"profile_id": profile_id, "profile_type": "LIVE", "selected": True}
 
 
+# --- milestone 21 (docs/tasklist.md item 21, ADR-0012): set_real_trading_enabled ---
+# get_profile_currencies/update_profile_currencies. See this module's
+# docstring header note below each function for the live-verified detail.
+
+_CONFIG_PATH = "/config"
+_PANEL_CURRENCY_ID = "panelCurrency"
+_PROFILE_PATH = "/profile"
+
+#: `JobKind`s `set_real_trading_enabled`'s job-store check inspects --
+#: duplicated verbatim from `octobot_mcp.tools.instance_lifecycle`'s own
+#: `_GUARDED_JOB_KINDS`/`_find_active_jobs` (per the tasklist's own
+#: instruction to reuse that pattern; duplicated rather than imported since
+#: `instance_lifecycle.py` already imports FROM this module
+#: -- `_fetch_and_parse_profiles` -- so importing back from it here would be
+#: circular; this project's established convention for small per-module
+#: helpers anyway, see `_request_raw`/`_extract_error_text` above).
+_GUARDED_JOB_KINDS = ("backtest", "data_collection")
+
+
+def _find_active_jobs(store: JobStore) -> list[dict[str, Any]]:
+    """Return every `queued`/`running` `backtest`/`data_collection` job.
+
+    Verbatim duplicate of `octobot_mcp.tools.instance_lifecycle._find_active_jobs`
+    -- see that function's docstring for the full rationale (ADR-0010
+    Decision 4, reused here per this milestone's own explicit instruction).
+    """
+    active: list[dict[str, Any]] = []
+    for kind in _GUARDED_JOB_KINDS:
+        for job in store.list_jobs(kind=kind):
+            if job.state in ("queued", "running"):
+                active.append({"job_id": job.job_id, "kind": job.kind, "state": job.state})
+    return active
+
+
+_ENABLING_REAL_TRADING_REASON = (
+    "This switches OctoBot from simulated to REAL trading -- from this "
+    "point on, orders are placed with real money on the connected "
+    "exchange(s). It also forces a full OctoBot restart (the same "
+    "abrupt kill-and-re-exec restart_octobot uses, confirmed against "
+    "source to be the identical underlying restart_bot call), which "
+    "briefly makes the instance unreachable. Call wait_for_octobot_ready() "
+    "afterward, then re-confirm via get_profile()/list_profiles() before "
+    "relying on this having taken effect."
+)
+_DISABLING_REAL_TRADING_REASON = (
+    "This switches OctoBot from real to SIMULATED trading. It still forces "
+    "a full OctoBot restart (the same abrupt kill-and-re-exec "
+    "restart_octobot uses), which briefly makes the instance unreachable "
+    "-- gated for that disruption even though this direction does not "
+    "itself put real money at risk. Call wait_for_octobot_ready() "
+    "afterward."
+)
+
+
+@with_error_handling
+async def set_real_trading_enabled(ctx: Context, enabled: bool, confirm: bool = False) -> Any:
+    """Toggle OctoBot's real-vs-simulated trading mode. Confirm-gated, BOTH directions (ADR-0003/ADR-0012).
+
+    Finally closes the gap left open by requirements doc open question #5
+    (`convert_profile_to_live` does NOT, and no other tool in this project's
+    prior scope could, set this flag).
+
+    Check order (mirrors `restart_octobot`'s own, ADR-0010 Decision 4, since
+    this tool triggers the exact same kind of restart):
+    1. **`confirm` flag.** If not exactly `true`, no OctoBot call is made at
+       all -- returns `require_confirmation`'s structured refusal. The
+       reason text differs by direction: enabling names BOTH the forced
+       restart AND the real-money consequence explicitly; disabling names
+       only the forced restart (lower-stakes direction, still gated per
+       ADR-0012 Decision 4's "the restart itself is disruptive" reasoning).
+    2. **`JobStore` active-job check.** Refuses outright -- a structured
+       non-exception return, naming every job -- if any `backtest`/
+       `data_collection` job is `queued`/`running` (duplicated verbatim from
+       `restart_octobot`'s own check, ADR-0010, per this milestone's own
+       explicit instruction).
+    3. **The one live call.** `POST /config`, JSON body
+       `{"global_config": {"trader_enabled": enabled,
+       "trader-simulator_enabled": !enabled}, "restart_after_save": true}` --
+       both keys always sent together [V: `navbar.js::trigger_trader_state`'s
+       exact logic, confirmed against `trading_state_modal.html`'s template
+       source, ADR-0012 Context]. `restart_after_save: true` is never
+       omitted (confirmed [V] against the full `/config` route source that
+       this unconditionally triggers
+       `models.schedule_delayed_command(models.restart_bot)` -- the SAME
+       restart primitive `restart_octobot` wraps via a different route).
+
+    Output on success: `{"real_trading_enabled": enabled, "restart_triggered":
+    true, "message": "...call wait_for_octobot_ready()..."}`.
+
+    **Does NOT need `convert_profile_to_live` called before or after** --
+    confirmed independent: `config.trader.enabled` and `profile.profile_type`
+    are two unrelated OctoBot concepts (see `convert_profile_to_live`'s own
+    docstring above).
+    """
+    if confirm is not True:
+        reason = _ENABLING_REAL_TRADING_REASON if enabled else _DISABLING_REAL_TRADING_REASON
+        return require_confirmation(
+            "set_real_trading_enabled", "enabled" if enabled else "disabled", reason
+        )
+
+    active_jobs = _find_active_jobs(get_job_store(ctx))
+    if active_jobs:
+        job_descriptions = ", ".join(
+            f"{job['kind']} job {job['job_id']} ({job['state']})" for job in active_jobs
+        )
+        return {
+            "real_trading_enabled": None,
+            "restart_triggered": False,
+            "active_jobs": active_jobs,
+            "message": (
+                "set_real_trading_enabled was NOT performed: at least one "
+                f"active job is still queued/running ({job_descriptions}). "
+                "A restart would kill it uncleanly. Cancel it via "
+                "cancel_job, or wait for it to finish, then retry."
+            ),
+        }
+
+    client = get_client(ctx)
+    response = await _request_raw(
+        client,
+        "POST",
+        _CONFIG_PATH,
+        json={
+            "global_config": {"trader_enabled": enabled, "trader-simulator_enabled": not enabled},
+            "restart_after_save": True,
+        },
+    )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot rejected set_real_trading_enabled(enabled={enabled!r}): "
+            f"{_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+
+    return {
+        "real_trading_enabled": enabled,
+        "restart_triggered": True,
+        "message": (
+            "OctoBot restart scheduled; call wait_for_octobot_ready() next, "
+            "then re-confirm via get_profile()/list_profiles() before "
+            "trading decisions that depend on this flag."
+        ),
+    }
+
+
+# --- get_profile_currencies / update_profile_currencies ----------------------
+
+
+def _parse_profile_currencies(html: str) -> list[dict[str, Any]]:
+    """Parse `/profile`'s `#panelCurrency` into per-currency dicts (fail-loud, NFR-21).
+
+    Mirrors `octobot_mcp.tools.exchanges._parse_exchanges`'s exact
+    per-entity-grouping structure (same generic `_config_scrape` helpers,
+    different container/prefix). Raises `ConfigElementScrapeContractBrokenError`
+    if `#panelCurrency` itself is missing, or a found currency lacks its
+    `enabled`/`pairs` fields -- never for zero traded currencies.
+    """
+    container = find_config_container(html, _PANEL_CURRENCY_ID, page_path=_PROFILE_PATH)
+    currencies: list[dict[str, Any]] = []
+    for name, entity in find_entities_with_config_elements(container):
+        prefix = f"crypto-currencies_{name}_"
+        by_field = {
+            strip_prefix(el["config_key"], prefix, context=f"get_profile_currencies currency={name!r}"): el[
+                "value"
+            ]
+            for el in scrape_config_elements(entity)
+        }
+        if "enabled" not in by_field or "pairs" not in by_field:
+            raise ConfigElementScrapeContractBrokenError(
+                f"get_profile_currencies: currency={name!r} is missing its "
+                "'enabled'/'pairs' config-element(s)."
+            )
+        currencies.append({"currency": name, "enabled": by_field["enabled"], "pairs": by_field["pairs"]})
+    return currencies
+
+
+@with_error_handling
+async def get_profile_currencies(ctx: Context) -> Any:
+    """Read the current profile's per-currency enable state and pair selection.
+
+    Tier-B (ADR-0012 Decision 1): scrapes `GET /profile`'s `#panelCurrency`
+    panel via the generic `octobot_mcp.tools._config_scrape` adapter.
+    Genuinely distinct from `update_profile`'s own `config` field (silently
+    ignored by OctoBot's deployed route, per that tool's existing
+    docstring) -- this reads/writes through the `/config` route instead,
+    confirmed live.
+
+    Output: `{"currencies": [{"currency": str, "enabled": bool, "pairs":
+    [str]}]}`.
+
+    Raises `ConfigElementScrapeContractBrokenError` only if `#panelCurrency`
+    itself is missing, or a found currency lacks its `enabled`/`pairs`
+    fields -- never for zero traded currencies. Idempotent, read-only, not
+    confirm-gated.
+    """
+    client = get_client(ctx)
+    response = await _request_raw(client, "GET", _PROFILE_PATH)
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} for GET {_PROFILE_PATH}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot returned client error {response.status_code} for GET {_PROFILE_PATH}",
+            status_code=response.status_code,
+        )
+    return {"currencies": _parse_profile_currencies(response.text)}
+
+
+@with_error_handling
+async def update_profile_currencies(ctx: Context, patch: dict[str, dict[str, Any]]) -> Any:
+    """Update per-profile traded-currency enable state and pair selection.
+
+    Input: `patch` maps a currency name (e.g. `"Bitcoin"`) to
+    `{"enabled"?: bool, "pairs"?: [str]}` -- only the provided sub-fields per
+    currency are sent.
+
+    Maps to `POST /config`, `{"global_config":
+    {"crypto-currencies_<Currency>_enabled"?: ...,
+    "crypto-currencies_<Currency>_pairs"?: ...}}` per currency in `patch`.
+
+    Output: `{"updated_fields": patch}` (a plain echo -- OctoBot's own
+    success response for this route is trustworthy by status code alone,
+    the same established finding `update_exchange_credentials`'s docstring
+    already documents for this exact route). Not confirm-gated (ADR-0012
+    Decision 4: a judgment call, flagged explicitly -- changes what a
+    real-trading profile actually trades, but meets none of this project's
+    literal gating criteria).
+    """
+    global_config: dict[str, Any] = {}
+    for currency, fields in patch.items():
+        if "enabled" in fields:
+            global_config[f"crypto-currencies_{currency}_enabled"] = fields["enabled"]
+        if "pairs" in fields:
+            global_config[f"crypto-currencies_{currency}_pairs"] = fields["pairs"]
+
+    client = get_client(ctx)
+    response = await _request_raw(client, "POST", _CONFIG_PATH, json={"global_config": global_config})
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot rejected update_profile_currencies: {_extract_error_text(response)}",
+            status_code=response.status_code,
+        )
+    return {"updated_fields": patch}
+
+
 def register(mcp: MCPServer) -> None:
     """Register this module's tools onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
     mcp.tool()(list_profiles)
@@ -1208,3 +1463,6 @@ def register(mcp: MCPServer) -> None:
     mcp.tool()(export_profile)
     mcp.tool()(delete_profile)
     mcp.tool()(convert_profile_to_live)
+    mcp.tool()(set_real_trading_enabled)
+    mcp.tool()(get_profile_currencies)
+    mcp.tool()(update_profile_currencies)

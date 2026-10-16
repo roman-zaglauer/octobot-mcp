@@ -13,10 +13,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from octobot_mcp.tools import (
+    automations,
     backtesting,
     data_collection,
     exchanges,
     instance_lifecycle,
+    interfaces,
     jobs,
     portfolio,
     profiles,
@@ -41,3 +43,5 @@ def register_all(mcp: "MCPServer") -> None:
     trading_config.register(mcp)
     data_collection.register(mcp)
     instance_lifecycle.register(mcp)
+    interfaces.register(mcp)
+    automations.register(mcp)

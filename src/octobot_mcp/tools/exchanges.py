@@ -88,6 +88,62 @@ No `from __future__ import annotations` here: see
 `octobot_mcp.tools._shared.with_error_handling`'s docstring for why
 postponed annotations would silently break this module's Context
 injection.
+
+## Milestone 21 (docs/tasklist.md item 21, ADR-0012): `get_exchanges`/
+`add_exchange`/`remove_exchange`/`update_exchange_trading_mode`
+
+All four reuse the exact same `POST /config` route `update_exchange_credentials`
+above already uses, confirmed [V] against the same source this module's
+milestone-12 research already read in full (`config_operations.py`'s
+`parse_and_update`/`clear_dictionaries_by_keys`); `get_exchanges` is this
+milestone's one read tool here, via the new generic
+`octobot_mcp.tools._config_scrape` Tier-B adapter (ADR-0012 Decision 1).
+
+**Shared underscore-in-exchange-name guard, extended to all four tools, not
+just `add_exchange` (a deliberate, documented extension -- see
+`ConfigElementScrapeContractBrokenError`'s docstring in `errors.py` for the
+full "why" and the explicit "exactly one new error class" constraint this
+respects)**: `_reject_exchange_name_with_underscore` below is the ONE shared
+implementation of the underscore guard `update_exchange_credentials`
+originally introduced inline (milestone 12) -- `add_exchange` reuses it per
+explicit instruction (same route, same corruption risk); `remove_exchange`
+(whose `removed_elements` entry is parsed by the exact same
+`parse_and_update`-family code, confirmed against source) and
+`update_exchange_trading_mode` (whose `global_config` keys are parsed
+identically) get the same guard applied for the same reason, not left as an
+unaddressed, already-understood gap in two sibling tools of the same module.
+
+**`get_exchanges()`, a genuine correction to ADR-0012's own Decision-section
+phrasing, confirmed against the live test instance's own real, currently-
+configured `binance` exchange**: the ADR describes `credentials_configured`
+as "whether `api-key`'s `config-value` DIFFERS from OctoBot's own masked
+placeholder". Read literally, that would make an exchange with REAL,
+currently-working credentials (rendered, confirmed live, as the masked
+placeholder `"*********"` -- OctoBot never echoes a real secret value, the
+same NFR-6 discipline `update_exchange_credentials` already relies on)
+report `credentials_configured: False`, and a brand-new, never-configured
+exchange card (rendered, confirmed live, with an EMPTY `config-value`)
+report `True` -- the exact opposite of what the field name means. This
+module implements the semantically-correct, live-confirmed version instead:
+`credentials_configured` is `True` iff `api-key`'s `config-value` EQUALS the
+masked placeholder (meaning "something real is hidden here"), `False`
+otherwise (empty, or the field absent entirely) -- per this project's
+established "verify what you actually implement" discipline (see
+`update_trading_config`'s own docstring for the precedent of not blindly
+copying a prior finding without re-checking it against real data).
+
+**Also a genuine correction, confirmed live**: `/accounts`' own exchange
+card has NO `exchange-type` config-element at all (only `enabled`/
+`sandboxed`) -- that field only renders on `/profile`'s `#panelExchanges`
+tab (the SAME underlying card macro, `lite_config=True`). Since this tool
+maps to `GET /accounts` per its spec entry (not `/profile`), its
+`exchange_type` output field is always `None` on this OctoBot version --
+documented here plainly rather than silently omitted or guessed at.
+Open question #17 (exact `exchange_type` enum values) is nonetheless
+RESOLVED by this same live fetch of `/profile`'s own exchange card,
+recorded for `update_exchange_trading_mode`'s benefit below: the two
+confirmed values are the literal strings `"spot"` and `"future"` (not
+`"futures"`).
 """
 
 from typing import Any
@@ -99,13 +155,30 @@ from mcp.server.mcpserver.context import Context
 from octobot_mcp.client import request_json
 from octobot_mcp.context import get_client
 from octobot_mcp.errors import (
+    ConfigElementScrapeContractBrokenError,
     ExchangeCredentialsUpdateRejectedError,
+    OctoBotClientError,
     OctoBotConnectionError,
+    OctoBotServerError,
     OctoBotTimeoutError,
+)
+from octobot_mcp.tools._config_scrape import (
+    find_config_container,
+    find_entities_with_config_elements,
+    scrape_config_elements,
+    strip_prefix,
 )
 from octobot_mcp.tools._shared import redact_secrets, require_confirmation, with_error_handling
 
 _GLOBAL_CONFIG_PATH = "/config"
+_ACCOUNTS_PATH = "/accounts"
+_EXCHANGE_CONTAINER_ID = "exchange-container"
+
+#: Confirmed live (ADR-0012 open question #19, `[V]`): the literal 9-asterisk
+#: string `exchange_card.html`'s macro renders for an already-masked
+#: credential field. See this module's docstring for the corrected
+#: `credentials_configured` semantics this constant backs.
+_MASKED_CREDENTIAL_PLACEHOLDER = "*********"
 
 
 @with_error_handling
@@ -318,17 +391,7 @@ async def update_exchange_credentials(
             "name and that you intend to grant this key trading access.",
         )
 
-    if "_" in exchange:
-        raise ExchangeCredentialsUpdateRejectedError(
-            f"update_exchange_credentials: exchange={exchange!r} contains an "
-            "underscore, which this tool refuses to send. OctoBot's own "
-            "config-path decoder (confirmed against source, "
-            "octobot_commons.configuration.config_operations.parse_and_update) "
-            "splits the 'exchanges_<exchange>_<field>' key on every literal "
-            "'_' positionally, so an exchange name containing '_' would be "
-            "silently written to the wrong nested config location instead "
-            "of this exchange's credentials."
-        )
+    _reject_exchange_name_with_underscore("update_exchange_credentials", exchange)
 
     submitted_secrets = [api_key, api_secret, api_password]
     global_config: dict[str, str] = {
@@ -359,6 +422,305 @@ async def update_exchange_credentials(
     }
 
 
+# --- milestone 21 (docs/tasklist.md item 21, ADR-0012): get_exchanges/ -----
+# add_exchange/remove_exchange/update_exchange_trading_mode. See this
+# module's own docstring for the full derivation and the two documented
+# corrections to ADR-0012's text.
+
+
+def _reject_exchange_name_with_underscore(tool_name: str, exchange: str) -> None:
+    """Raise `ExchangeCredentialsUpdateRejectedError` if `exchange` contains an underscore.
+
+    The ONE shared implementation of the guard `update_exchange_credentials`
+    originally introduced inline (milestone 12) -- see this module's
+    docstring for why it is now also applied to `add_exchange`/
+    `remove_exchange`/`update_exchange_trading_mode`, not just the tool it
+    was first written for. A no-op (returns `None`) when `exchange` contains
+    no underscore.
+    """
+    if "_" in exchange:
+        raise ExchangeCredentialsUpdateRejectedError(
+            f"{tool_name}: exchange={exchange!r} contains an underscore, "
+            "which this tool refuses to send. OctoBot's own config-path "
+            "decoder (confirmed against source, octobot_commons.configuration."
+            "config_operations.parse_and_update) splits a flat "
+            "'exchanges_<exchange>_<field>' key (or a 'exchanges_<exchange>' "
+            "removed_elements entry) on every literal '_' positionally, so "
+            "an exchange name containing '_' would be silently written to "
+            "(or deleted from) the wrong nested config location instead of "
+            "this exchange's own."
+        )
+
+
+async def _fetch_accounts_html(client: httpx.AsyncClient) -> str:
+    """Fetch `GET /accounts`'s raw HTML body, classified like `request_json` (NFR-4).
+
+    Mirrors `octobot_mcp.tools.profiles._fetch_profiles_selector_html`
+    (`request_json` can't be reused: this route renders HTML, not JSON).
+    """
+    response = await _request_raw(client, "GET", _ACCOUNTS_PATH)
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} for "
+            f"GET {_ACCOUNTS_PATH}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot returned client error {response.status_code} for "
+            f"GET {_ACCOUNTS_PATH}",
+            status_code=response.status_code,
+        )
+    return response.text
+
+
+def _parse_exchanges(html: str) -> list[dict[str, Any]]:
+    """Parse `/accounts`' exchange-card deck into exchange dicts (fail-loud, NFR-21).
+
+    See this module's docstring for the two documented corrections this
+    function implements (`credentials_configured`'s corrected semantics,
+    `exchange_type` always `None` on this page). Raises
+    `ConfigElementScrapeContractBrokenError` if `#exchange-container` itself
+    is missing, or if a found exchange card lacks its `enabled`
+    config-element -- never for zero configured exchanges (a fresh instance
+    may legitimately have none).
+    """
+    container = find_config_container(html, _EXCHANGE_CONTAINER_ID, page_path=_ACCOUNTS_PATH)
+    exchanges: list[dict[str, Any]] = []
+    for name, entity in find_entities_with_config_elements(container):
+        prefix = f"exchanges_{name}_"
+        by_field = {
+            strip_prefix(el["config_key"], prefix, context=f"get_exchanges exchange={name!r}"): el["value"]
+            for el in scrape_config_elements(entity)
+        }
+        if "enabled" not in by_field:
+            raise ConfigElementScrapeContractBrokenError(
+                f"get_exchanges: exchange={name!r} has no 'enabled' config-element."
+            )
+        api_key_value = by_field.get("api-key")
+        exchanges.append(
+            {
+                "name": name,
+                "enabled": by_field["enabled"],
+                # [V] confirmed absent on /accounts (lite_config=False) --
+                # only /profile's card (lite_config=True) renders it. See
+                # this module's docstring.
+                "exchange_type": by_field.get("exchange-type"),
+                "credentials_configured": api_key_value == _MASKED_CREDENTIAL_PLACEHOLDER,
+            }
+        )
+    return exchanges
+
+
+@with_error_handling
+async def get_exchanges(ctx: Context) -> Any:
+    """List every configured exchange's enable state, trading mode, and whether credentials are set.
+
+    Tier-B (ADR-0012 Decision 1): scrapes `GET /accounts`'s exchange-card
+    deck (`#exchange-container`) via the generic
+    `octobot_mcp.tools._config_scrape` adapter. Closes ADR-0006's own
+    long-standing "no full exchange list" gap (`get_exchange_details` only
+    ever returns one exchange, by design).
+
+    Output: `{"exchanges": [{"name": str, "enabled": bool, "exchange_type":
+    str | null, "credentials_configured": bool}]}`. `exchange_type` is
+    always `null` on this OctoBot version -- see this module's docstring for
+    why (a genuine correction: this field simply isn't rendered on
+    `/accounts`, only on `/profile`). `credentials_configured` reflects
+    whether `api-key`'s `config-value` equals OctoBot's own masked
+    placeholder -- see this module's docstring for the correction to a
+    literal reading of ADR-0012's "differs from the placeholder" phrasing.
+    Never includes the actual key/secret/password value.
+
+    Raises `ConfigElementScrapeContractBrokenError` only if
+    `#exchange-container` itself is missing, or a found exchange lacks its
+    `enabled` field -- never for zero configured exchanges. Idempotent,
+    read-only, not confirm-gated.
+    """
+    html = await _fetch_accounts_html(get_client(ctx))
+    return {"exchanges": _parse_exchanges(html)}
+
+
+@with_error_handling
+async def add_exchange(
+    ctx: Context,
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    api_password: str | None = None,
+    confirm: bool = False,
+) -> Any:
+    """Add a new exchange's credentials. Confirm-gated (ADR-0003/ADR-0012).
+
+    If `confirm` is not exactly `true`, no OctoBot call is made at all --
+    returns `require_confirmation`'s structured refusal. Reason given: "adds
+    a new exchange and grants this key trading access; verify the exchange
+    name".
+
+    Refuses locally, before any OctoBot call, if `exchange` contains an
+    underscore -- the same guard `update_exchange_credentials` applies,
+    reused via `_reject_exchange_name_with_underscore` (explicitly
+    instructed: same underlying route/corruption risk).
+
+    Once confirmed, maps to `POST /config` with JSON body
+    `{"global_config": {"exchanges_<exchange>_api-key": ...,
+    "exchanges_<exchange>_api-secret": ..., ["exchanges_<exchange>_api-password":
+    ...], "exchanges_<exchange>_enabled": true}}` -- identical to
+    `update_exchange_credentials`'s own body, PLUS the explicit
+    `_enabled: true` key (confirmed [V] against `exchange_card.html`'s
+    macro: `enabled` is an independent flat key
+    `update_exchange_credentials` never sets).
+
+    Output on success: `{"exchange": str, "added": true, "api_key_last4":
+    str}` -- never the full key/secret (NFR-6). Raises
+    `ExchangeCredentialsUpdateRejectedError` on a non-2xx response (reused
+    from `update_exchange_credentials`, same underlying route/failure mode).
+    """
+    if confirm is not True:
+        return require_confirmation(
+            "add_exchange",
+            exchange,
+            "This adds a new exchange and grants this key trading access; "
+            "verify the exchange name.",
+        )
+
+    _reject_exchange_name_with_underscore("add_exchange", exchange)
+
+    submitted_secrets = [api_key, api_secret, api_password]
+    global_config: dict[str, Any] = {
+        f"exchanges_{exchange}_api-key": api_key,
+        f"exchanges_{exchange}_api-secret": api_secret,
+    }
+    if api_password is not None:
+        global_config[f"exchanges_{exchange}_api-password"] = api_password
+    global_config[f"exchanges_{exchange}_enabled"] = True
+
+    client = get_client(ctx)
+    response = await _request_raw(
+        client, "POST", _GLOBAL_CONFIG_PATH, json={"global_config": global_config}
+    )
+    if response.status_code >= 400:
+        raw_error_text = _extract_error_text(response)
+        raise ExchangeCredentialsUpdateRejectedError(
+            f"OctoBot rejected adding exchange={exchange!r}: "
+            f"{redact_secrets(raw_error_text, submitted_secrets)}"
+        )
+
+    return {
+        "exchange": exchange,
+        "added": True,
+        "api_key_last4": api_key[-4:] if len(api_key) >= 4 else api_key,
+    }
+
+
+@with_error_handling
+async def remove_exchange(ctx: Context, exchange: str, confirm: bool = False) -> Any:
+    """Remove a whole configured exchange (credentials AND config entry). Confirm-gated (ADR-0003/ADR-0012).
+
+    If `confirm` is not exactly `true`, no OctoBot call is made at all --
+    returns `require_confirmation`'s structured refusal. Reason given
+    explicitly states this deletes the exchange's saved credentials, not
+    just a config entry (ADR-0012: a stronger warning than a generic
+    "removes this exchange", since the credentials are NOT recoverable from
+    this server afterward -- OctoBot never echoes them back).
+
+    Refuses locally, before any OctoBot call, if `exchange` contains an
+    underscore (see this module's docstring: `removed_elements`' key is
+    parsed by the same splitting mechanism as `global_config`'s keys).
+
+    Once confirmed, maps to `POST /config` with JSON body
+    `{"removed_elements": ["exchanges_<exchange>"]}` -- confirmed [V]
+    against `config_operations.py`'s full source that a `removed_elements`
+    entry deletes the WHOLE nested node it names
+    (`config["exchanges"]["<exchange>"]` entirely, credentials included),
+    not one field.
+
+    Output on success: `{"exchange": str, "removed": true}`. Raises
+    `ExchangeCredentialsUpdateRejectedError` on a non-2xx response (reused,
+    same module/route).
+    """
+    if confirm is not True:
+        return require_confirmation(
+            "remove_exchange",
+            exchange,
+            "This permanently deletes the exchange's saved credentials and "
+            "configuration, not just one field, and cannot be undone.",
+        )
+
+    _reject_exchange_name_with_underscore("remove_exchange", exchange)
+
+    client = get_client(ctx)
+    response = await _request_raw(
+        client, "POST", _GLOBAL_CONFIG_PATH, json={"removed_elements": [f"exchanges_{exchange}"]}
+    )
+    if response.status_code >= 400:
+        raise ExchangeCredentialsUpdateRejectedError(
+            f"OctoBot rejected removing exchange={exchange!r}: {_extract_error_text(response)}"
+        )
+    return {"exchange": exchange, "removed": True}
+
+
+@with_error_handling
+async def update_exchange_trading_mode(
+    ctx: Context,
+    exchange: str,
+    exchange_type: str | None = None,
+    enabled: bool | None = None,
+) -> Any:
+    """Update a configured exchange's trading mode (spot/futures) and/or enabled state. Not confirm-gated.
+
+    At least one of `exchange_type`/`enabled` is required -- raises
+    `ExchangeCredentialsUpdateRejectedError` locally (no OctoBot call) if
+    both are omitted. Refuses locally for an underscore in `exchange`, same
+    as this module's other three writes.
+
+    `exchange_type`'s confirmed accepted values (resolving open question
+    #17, via this module's own live fetch of `/profile`'s exchange card --
+    see this module's docstring) are the literal strings `"spot"` and
+    `"future"` -- NOT validated client-side against this list (per the
+    spec's own "do not validate against a guessed enum" instruction), only
+    documented here for the caller's benefit.
+
+    Maps to `POST /config`, `{"global_config":
+    {"exchanges_<exchange>_exchange-type"?: exchange_type,
+    "exchanges_<exchange>_enabled"?: enabled}}` -- only the provided
+    field(s) are sent.
+
+    Output: `{"exchange": str, "updated_fields": {<only the fields actually
+    provided>}}`. Not confirm-gated (ADR-0012 Decision 4: a judgment call,
+    flagged explicitly rather than silently decided -- switching trading
+    mode materially changes risk on a real-trading exchange but meets none
+    of this project's literal gating criteria).
+    """
+    _reject_exchange_name_with_underscore("update_exchange_trading_mode", exchange)
+
+    if exchange_type is None and enabled is None:
+        raise ExchangeCredentialsUpdateRejectedError(
+            "update_exchange_trading_mode: at least one of exchange_type/"
+            "enabled must be given; neither was provided."
+        )
+
+    global_config: dict[str, Any] = {}
+    updated_fields: dict[str, Any] = {}
+    if exchange_type is not None:
+        global_config[f"exchanges_{exchange}_exchange-type"] = exchange_type
+        updated_fields["exchange_type"] = exchange_type
+    if enabled is not None:
+        global_config[f"exchanges_{exchange}_enabled"] = enabled
+        updated_fields["enabled"] = enabled
+
+    client = get_client(ctx)
+    response = await _request_raw(
+        client, "POST", _GLOBAL_CONFIG_PATH, json={"global_config": global_config}
+    )
+    if response.status_code >= 400:
+        raise ExchangeCredentialsUpdateRejectedError(
+            f"OctoBot rejected updating trading mode for exchange={exchange!r}: "
+            f"{_extract_error_text(response)}"
+        )
+    return {"exchange": exchange, "updated_fields": updated_fields}
+
+
 def register(mcp: MCPServer) -> None:
     """Register this module's tools onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
     mcp.tool()(get_currency_list)
@@ -367,3 +729,7 @@ def register(mcp: MCPServer) -> None:
     mcp.tool()(check_accounts_compatible)
     mcp.tool()(get_exchange_details)
     mcp.tool()(update_exchange_credentials)
+    mcp.tool()(get_exchanges)
+    mcp.tool()(add_exchange)
+    mcp.tool()(remove_exchange)
+    mcp.tool()(update_exchange_trading_mode)

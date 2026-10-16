@@ -295,6 +295,61 @@ that raises it), per this project's established ordering convention:
   structured non-exception returns (`require_confirmation`/ADR-0003, and a
   plain dict for the job-store check respectively), the same convention as
   every other gated tool.
+
+Task 21 (docs/tasklist.md item 21, ADR-0012, the accounts/profile
+global-config addendum) adds exactly one new class (per this milestone's own
+explicit "minimal new error classes" instruction), defined just above
+`EvaluatorScrapeContractBrokenError` for easy visual comparison with every
+other Tier-B adapter's own exception class:
+- `ConfigElementScrapeContractBrokenError` -- shared by all four new read
+  tools backed by the generic `.config-element` scrape helper
+  (`octobot_mcp.tools._config_scrape`) -- `get_exchanges`/`get_interfaces`/
+  `get_notification_routing`/`get_profile_currencies` (NFR-21). See its own
+  class docstring below for the full detail.
+
+`ExchangeCredentialsUpdateRejectedError` above (originally scoped to
+`update_exchange_credentials` alone, milestone 12) is REUSED, not
+duplicated, as this milestone's one shared write-failure exception across
+ALL FOUR of `exchanges.py`'s exchange-domain mutation tools --
+`update_exchange_credentials`, `add_exchange` (explicitly instructed to
+reuse it, same underlying `/config` route/failure mode), and -- a bounded,
+documented extension this milestone makes explicitly rather than silently --
+`remove_exchange`/`update_exchange_trading_mode` too. Justification for the
+extension: all four share the exact same OctoBot route and the exact same
+underscore-in-exchange-name config-path-corruption risk this class already
+exists to guard against (confirmed against the same source
+`parse_and_update`/`clear_dictionaries_by_keys` mechanics this class's
+original docstring already cites, which splits ANY flat key -- including a
+`removed_elements` entry's key, not just a `global_config` one -- on every
+literal `"_"` positionally), and this milestone's own explicit instruction
+calls for exactly one new error class total plus this one reuse, not four
+more single-tool classes for a family of sibling writes against one
+already-well-understood route. `octobot_mcp.tools.interfaces`'s two write
+tools (`update_interface_config`/`update_notification_routing`) and
+`octobot_mcp.tools.profiles`'s two new write tools
+(`set_real_trading_enabled`/`update_profile_currencies`) deliberately do NOT
+get a new dedicated class each, for the same "exactly one new class total"
+reason -- their OctoBot-side write failures are classified via the plain
+`OctoBotClientError`/`OctoBotServerError` every non-2xx HTTP response is
+already mapped to, mirroring `clear_orders_history`/`clear_trades_history`/
+`clear_portfolio_history`/`clear_transactions_history`'s own established
+"no dedicated exception class needed, the generic HTTP-status classification
+is already the right (and only) one" precedent (milestone 12's note above).
+See `octobot_mcp.tools.exchanges`/`octobot_mcp.tools.interfaces`/
+`octobot_mcp.tools.profiles`'s own module docstrings for the full detail.
+
+Task 22 (docs/tasklist.md item 22, ADR-0013, the Automations addendum) adds
+two new classes, appended at the very end of this file (after
+`EvaluationMatrixScrapeContractBrokenError`): `AutomationConfigInvalidError`
+(the one signal ADR-0013 confirmed for this route -- an HTTP 400 from
+`start_automations`/`reset_automations_to_default` means OctoBot's own
+`InvalidAutomationConfigError`, i.e. the saved automation config doesn't
+parse) and `AutomationConfigUpdateRejectedError` (one dedicated class per
+write tool, matching `TentacleConfigUpdateRejectedError`/
+`TradingConfigUpdateRejectedError`/`EvaluatorConfigUpdateRejectedError`'s
+own precedent, covering `update_automations` and any non-400 failure of the
+other two). See `octobot_mcp.tools.automations`'s own module docstring for
+the full detail.
 """
 
 from __future__ import annotations
@@ -719,6 +774,31 @@ class RestartFailedError(OctoBotAPIError):
     """
 
 
+class ConfigElementScrapeContractBrokenError(OctoBotAPIError):
+    """The generic `.config-element` Tier-B scrape helper's structural
+    assumptions didn't hold (task 21, ADR-0012, NFR-21).
+
+    Shared by all four new read tools backed by
+    `octobot_mcp.tools._config_scrape.scrape_config_elements`/
+    `find_config_container` -- `get_exchanges`, `get_interfaces`,
+    `get_notification_routing`, `get_profile_currencies` -- since they all
+    use the exact same generic scrape mechanism (unlike every prior Tier-B
+    adapter above, which is one mechanism per one read tool, hence one
+    exception class per adapter). Raised when a tool's target container
+    itself is missing from the page, or when an individual `.config-element`
+    is missing its `config-key`/`data-type` attribute or carries a
+    `config-value` that doesn't parse against its own declared `data-type`
+    (`bool`/`number`/`text`/`list`). **Deliberately NOT raised when a
+    container is intact but holds zero matched `.config-element`s** -- a
+    fresh instance may legitimately have zero configured interface services,
+    or a profile may legitimately trade zero currencies (mirrors ADR-0011's
+    "zero is not broken" precedent for `get_portfolio_snapshot`/
+    `get_evaluation_matrix`, not `list_profiles`'/`list_evaluators`'s
+    "zero is always broken" one). See `octobot_mcp.tools._config_scrape`'s
+    module docstring for the full list of structural assumptions asserted.
+    """
+
+
 class EvaluatorScrapeContractBrokenError(OctoBotAPIError):
     """The `GET /advanced/evaluator_config` HTML page's structure didn't
     match this server's third Tier-B scrape adapter's expectations
@@ -780,4 +860,52 @@ class EvaluationMatrixScrapeContractBrokenError(OctoBotAPIError):
     project's established one-domain-specific-exception-class-per-adapter
     convention. See `octobot_mcp.tools.trading_config.get_evaluation_matrix`
     for the exact assumptions this guards.
+    """
+
+
+class AutomationConfigInvalidError(OctoBotAPIError):
+    """`start_automations`/`reset_automations_to_default` failed because the
+    currently saved automation config is structurally invalid (milestone 22,
+    ADR-0013 Decision 5).
+
+    Raised only after the caller has already confirmed (`confirm=true`) and
+    no active `backtest`/`data_collection` job blocked the call -- see
+    `octobot_mcp.tools._shared.require_confirmation` for the unconfirmed
+    path and `octobot_mcp.tools.automations._find_active_jobs` for the
+    job-store check, both structured non-exception returns, never this
+    exception. Wraps OctoBot's own `InvalidAutomationConfigError` message,
+    raised by `models.restart_global_automations()` (confirmed against
+    source `Services/Interfaces/web_interface/controllers/automation.py`,
+    ADR-0013 Context) whenever the saved automation config doesn't parse.
+    Classified via the one signal ADR-0013 confirmed for this route: an
+    HTTP 400 response is specifically this error, distinct from any other
+    non-2xx status (`AutomationConfigUpdateRejectedError` below). See
+    `octobot_mcp.tools.automations.start_automations`/
+    `reset_automations_to_default`'s docstrings for the full verified
+    request/response shape.
+    """
+
+
+class AutomationConfigUpdateRejectedError(OctoBotAPIError):
+    """`update_automations` failed (milestone 22, ADR-0013 Decision 2), or
+    `start_automations`/`reset_automations_to_default` failed for a reason
+    OTHER than an invalid saved config (any non-400 non-2xx response -- e.g.
+    `reset_automations_to_default`'s own config-reset step failing
+    independently of the `InvalidAutomationConfigError` its following
+    restart call can separately raise).
+
+    One dedicated class per write tool, matching this project's established
+    convention (`TentacleConfigUpdateRejectedError`/
+    `TradingConfigUpdateRejectedError`/`EvaluatorConfigUpdateRejectedError`
+    above), rather than reusing one of those for a genuinely different
+    route. Not confirm-gated for `update_automations` itself (ADR-0013
+    Decision 2: mutates saved config only, does not itself start anything).
+    The exact JSON success/failure response shape for `POST /automations`'s
+    `save`/`start`/`factory_reset` actions was not observed live this
+    session (ADR-0013's Context: no automation was ever actually
+    saved/started/reset against the live instance, only the read-only
+    `GET /automations_edit_details` route was exercised) -- this class's
+    message carries whatever error text
+    `octobot_mcp.tools.automations._extract_error_text` could extract,
+    honestly, never a guessed/invented substantive message.
     """

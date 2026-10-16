@@ -21,14 +21,17 @@ for what's explicitly out of scope and why).
 **Status: v1 complete, plus several post-v1 addenda.** All 14 original
 tasklist milestones, and additional addenda closing gaps found after v1
 shipped (historical data collection, evaluator config, this server's own
-logging, and a scoped OctoBot-restart capability), are implemented,
-judge-verified, and committed — see `docs/tasklist.md` for the full,
-numbered history. The server registers **47 tools** across profiles, async
-backtesting/strategy comparison/historical data collection, portfolio &
-trading, exchanges, tentacle/trading config, and instance lifecycle. See
-"Available tools" below for the full list, or connect a client and read
-`mcp.instructions`/each tool's own description — both are written to stand
-alone without this file.
+logging, a scoped OctoBot-restart capability, a portfolio snapshot and live
+evaluation matrix, accounts/profile global-config writes — real-trading
+toggle, exchange add/remove, interface/notification config, per-profile
+currency selection — and automations), are implemented, judge-verified, and
+committed — see `docs/tasklist.md` for the full, numbered history. The
+server registers **64 tools** across profiles, async backtesting/strategy
+comparison/historical data collection, portfolio & trading, exchanges,
+interfaces & notifications, tentacle/trading config, instance lifecycle, and
+automations. See "Available tools" below for the full list, or connect a
+client and read `mcp.instructions`/each tool's own description — both are
+written to stand alone without this file.
 
 ## Requirements
 
@@ -89,13 +92,20 @@ claude mcp add octobot --env OCTOBOT_BASE_URL=http://192.168.178.100:5001 -- /ab
 ```
 
 Then run `/mcp` inside a Claude Code session to confirm `octobot` is
-connected and lists 49 tools.
+connected and lists 64 tools.
 
 ## Available tools
 
 - **Profiles**: `list_profiles`, `get_profile`, `create_profile`,
   `update_profile`, `select_profile`, `export_profile`, `delete_profile`
-  (confirm-gated), `convert_profile_to_live` (confirm-gated)
+  (confirm-gated), `convert_profile_to_live` (confirm-gated),
+  `set_real_trading_enabled` (task 21, ADR-0012 — confirm-gated in BOTH
+  directions; finally closes the real-vs-simulated-trading toggle gap
+  `convert_profile_to_live` above explicitly does NOT fill, forces a full
+  OctoBot restart), `get_profile_currencies`/`update_profile_currencies`
+  (task 21, ADR-0012 — per-profile traded-currency enable state/pair
+  selection, neither gated; genuinely distinct from `update_profile`'s own
+  broken `config` passthrough field above)
 - **Backtesting & strategy comparison** (async — `start_backtest`/
   `compare_strategies` return a `job_id` immediately; poll `get_job_status`
   until `state` is terminal, then call `get_job_result`): `start_backtest`,
@@ -113,7 +123,25 @@ connected and lists 49 tools.
   directly)
 - **Exchanges**: `get_currency_list`, `get_all_currencies`, `get_all_symbols`,
   `check_accounts_compatible`, `get_exchange_details`,
-  `update_exchange_credentials` (confirm-gated)
+  `update_exchange_credentials` (confirm-gated), `get_exchanges` (task 21,
+  ADR-0012 — lists every configured exchange's enable state/credential
+  status via a Tier-B scrape of `/accounts`, closing ADR-0006's own "no full
+  exchange list" gap), `add_exchange` (confirm-gated), `remove_exchange`
+  (confirm-gated — also deletes the exchange's saved credentials, not just
+  a config entry), `update_exchange_trading_mode` (not confirm-gated —
+  switching spot/futures mode is a flagged judgment call, ADR-0012
+  Decision 4)
+- **Interfaces & notifications** (task 21, ADR-0012, new module
+  `interfaces.py`): `get_interfaces` (Tier-B scrape of `/accounts`'
+  configured services — Telegram/Web/etc. — with any credential-shaped
+  field redacted), `update_interface_config` (CONDITIONALLY confirm-gated —
+  the ONE tool in this project whose gating is per-call, not per-tool: a
+  patch touching a field matching a secret-suffix list — `token`/`secret`/
+  `password`/`api-key`/`api-secret`/`api-password`/`api-hash`/
+  `client-secret` — requires `confirm=true`; a patch touching only
+  non-credential fields, e.g. `port`, proceeds without it),
+  `get_notification_routing`/`update_notification_routing` (neither
+  gated — routing only, no credentials/destruction/live-trading involved)
 - **Tentacle & trading config**: `get_tentacle_config`,
   `update_tentacle_config`, `update_trading_config`, `update_evaluator_config`,
   `list_evaluators` (task 19, ADR-0009 — a third Tier-B HTML-scrape read
@@ -155,12 +183,31 @@ connected and lists 49 tools.
   `docs/adr/0010-octobot-restart-capability.md`'s "Negative finding" for
   the full account, including an open question of whether to keep this
   capability at all now that its stated purpose doesn't hold.
+- **Automations** (task 22, ADR-0013 — reuses the existing tentacle-config
+  mechanism `update_tentacle_config` already wraps, not a new rules-engine
+  subsystem): `get_automations`/`update_automations` read/write the
+  current profile's automation configuration, passthrough-only (never
+  reshaping OctoBot's own schema, NFR-24); `start_automations`
+  (**confirm-gated**, under a brand-new gating category — "activates
+  autonomous, ongoing behavior beyond this one call" — distinct from every
+  other gated tool's destructive/credential-exposure/live-trading
+  reasoning) activates the saved configuration; `reset_automations_to_default`
+  (**confirm-gated**, under the ordinary irreversible-deletion criterion,
+  the same category as `clear_*_history`/`delete_data_file`) factory-resets
+  it to OctoBot's default. Both also restart automations and refuse
+  outright (no OctoBot call) if an active backtest/data-collection job is
+  running, mirroring `restart_octobot`'s own `JobStore` check. Both raise a
+  distinct `AutomationConfigInvalidError` if OctoBot reports the saved
+  config is structurally invalid, never a generic failure.
 
 Any tool marked "confirm-gated" refuses to act unless called with
 `confirm=true`, returning a structured explanation instead (ADR-0003) — see
 `mcp.instructions`' "Safety" section for the full rationale. `delete_data_file`
 is confirm-gated alongside `delete_profile`/`convert_profile_to_live`/the
-`clear_*_history` tools/`update_exchange_credentials`/`restart_octobot`.
+`clear_*_history` tools/`update_exchange_credentials`/`restart_octobot`/
+`set_real_trading_enabled` (both directions)/`add_exchange`/`remove_exchange`/
+`update_interface_config` (conditionally — see "Interfaces & notifications"
+above)/`start_automations`/`reset_automations_to_default`.
 
 ## Logging
 
@@ -186,7 +233,7 @@ to whatever the MCP client captures from the subprocess.
 pytest
 ```
 
-393 tests, no live instance required — every test mocks the OctoBot HTTP/
+488 tests, no live instance required — every test mocks the OctoBot HTTP/
 Socket.IO layer. Live verification against a real instance was done
 per-milestone during development (see each milestone's commit message). CI
 runs this same suite on every push and pull request (see the CI badge above).

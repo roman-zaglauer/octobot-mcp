@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head><title>OctoBot /accounts (trimmed, redacted real fixture)</title></head>
+<body>
+<div class="tab-pane fade config-root show" id="panelExchanges" role="tabpanel">
+  <div class="card-body deck-container">
+    <div class="card" id="new-exchange-selector">
+      <div class="card-body">Add a new exchange :
+        <select id="AddExchangeSelect"></select>
+        <button type="button" id="AddExchange">Add</button>
+      </div>
+    </div>
+    <div class="card-deck config-container" id="exchange-container" update-url="/api/are_compatible_accounts">
+      <div data-role="exchange" class="card mb-4 config-card">
+        <div class="card-header d-flex"><h4 class="text-capitalize">binance</h4></div>
+        <div class="card-body px-2 px-md-4" name="binance" config-key="exchanges_binance">
+          <p class="card-text api analytics-hidden">
+            API Key : <a href="#" config-key="exchanges_binance_api-key" config-type="global_config"
+               config-value="*********" data-type="text" class="editable config-element">*********</a><br>
+            API Secret : <a href="#" config-key="exchanges_binance_api-secret" config-type="global_config"
+               config-value="*********" data-type="text" class="editable config-element">*********</a><br>
+            <i>API Pass/UID</i> : <a href="#" config-key="exchanges_binance_api-password" config-type="global_config"
+               config-value="*********" data-type="text" class="editable config-element">*********</a><br>
+          </p>
+          <div class="custom-control custom-switch">
+            <input type="checkbox" class="custom-control-input config-element" id="exchange_binance_enabled"
+                   config-key="exchanges_binance_enabled" config-type="global_config" config-value="True"
+                   data-type="bool" checked>
+            <label for="exchange_binance_enabled">Enabled</label>
+          </div>
+          <div class="custom-control custom-switch">
+            <input type="checkbox" class="custom-control-input config-element" id="exchange_binance_sandboxed"
+                   config-key="exchanges_binance_sandboxed" config-type="global_config" config-value="False"
+                   data-type="bool">
+            <label for="exchange_binance_sandboxed">Trade in exchange sandbox</label>
+          </div>
+          <button type="button" class="btn btn-danger remove-btn">Remove</button>
+        </div>
+      </div>
+      <div data-role="exchange" class="card mb-4 config-card">
+        <div class="card-header d-flex"><h4 class="text-capitalize">kraken</h4></div>
+        <div class="card-body px-2 px-md-4" name="kraken" config-key="exchanges_kraken">
+          <p class="card-text api analytics-hidden">
+            API Key : <a href="#" config-key="exchanges_kraken_api-key" config-type="global_config"
+               config-value="" data-type="text" class="editable config-element"></a><br>
+            API Secret : <a href="#" config-key="exchanges_kraken_api-secret" config-type="global_config"
+               config-value="" data-type="text" class="editable config-element"></a><br>
+          </p>
+          <div class="custom-control custom-switch">
+            <input type="checkbox" class="custom-control-input config-element" id="exchange_kraken_enabled"
+                   config-key="exchanges_kraken_enabled" config-type="global_config" config-value="False"
+                   data-type="bool">
+            <label for="exchange_kraken_enabled">Enabled</label>
+          </div>
+          <button type="button" class="btn btn-danger remove-btn">Remove</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="tab-pane fade config-root" id="panelServices" role="tabpanel">
+  <div class="card-body deck-container">
+    <div class="card"><div class="card-body">Add a new interface :
+      <select id="AddServiceSelect"></select>
+      <button type="button" id="AddService">Add</button>
+    </div></div>
+    <div class="card-deck config-container" update-url="/config">
+      <div class="card mb-4 config-card">
+        <div class="card-header d-flex"><h4 class="text-capitalize">telegram</h4></div>
+        <div class="card-body" name="telegram" config-key="services_telegram">
+          <p class="card-text api analytics-hidden">
+            <span>chat-id : <a href="#" config-key="services_telegram_chat-id" config-type="global_config"
+               config-value="111222333" data-type="text" class="editable config-element">111222333</a><br></span>
+            <span>token : <a href="#" config-key="services_telegram_token" config-type="global_config"
+               config-value="0000000000:FAKE-REDACTED-TOKEN-ffffffffff" data-type="text"
+               class="editable config-element">0000000000:FAKE-REDACTED-TOKEN-ffffffffff</a><br></span>
+            <span>usernames-whitelist :
+              <select config-key="services_telegram_usernames-whitelist" config-type="global_config"
+                      config-value="[]" data-type="list" class="editable config-element multi-select-element">
+              </select>
+            </span>
+          </p>
+          <button type="button" class="btn btn-danger remove-btn">Remove</button>
+        </div>
+      </div>
+      <div class="card mb-4 config-card">
+        <div class="card-header d-flex"><h4 class="text-capitalize">web</h4></div>
+        <div class="card-body" name="web" config-key="services_web">
+          <p class="card-text api analytics-hidden">
+            <span>port : <a href="#" config-key="services_web_port" config-type="global_config"
+               config-value="5001" data-type="number" class="editable config-element">5001</a><br></span>
+            <div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element" id="services_web_auto-open-in-web-browser"
+                     config-key="services_web_auto-open-in-web-browser" config-type="global_config"
+                     config-value="True" data-type="bool" checked>
+              <label for="services_web_auto-open-in-web-browser">auto-open-in-web-browser</label>
+            </div>
+            <div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element" id="services_web_require-password"
+                     config-key="services_web_require-password" config-type="global_config"
+                     config-value="False" data-type="bool">
+              <label for="services_web_require-password">require-password</label>
+            </div>
+            <span>password : <a href="#" config-key="services_web_password" config-type="global_config"
+               config-value="*********" data-type="text" class="editable config-element">*********</a><br></span>
+          </p>
+          <button type="button" class="btn btn-danger remove-btn">Remove</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="tab-pane fade config-root" id="panelNotifications" role="tabpanel">
+  <div class="card-body deck-container">
+    <div class="card-deck config-container">
+      <div class="card mb-4 config-card">
+        <div class="card-header"><h4>Enabled notification events</h4></div>
+        <div class="card-body">
+          <p class="card-text config">
+            <span><div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element" id="notification_global-info"
+                     config-key="notification_global-info" config-type="global_config" config-value="True"
+                     data-type="bool" checked>
+              <label for="notification_global-info">global-info</label>
+            </div></span>
+            <span>
+              <select config-key="notification_notification-type" config-type="global_config"
+                      config-value="[&#39;web&#39;, &#39;telegram&#39;]" data-type="list"
+                      class="editable config-element multi-select-element">
+                <option value="web" selected="selected">web</option>
+                <option value="telegram" selected="selected">telegram</option>
+              </select>
+            </span>
+            <span><div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element" id="notification_other"
+                     config-key="notification_other" config-type="global_config" config-value="True"
+                     data-type="bool" checked>
+              <label for="notification_other">other</label>
+            </div></span>
+            <span><div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element" id="notification_price-alerts"
+                     config-key="notification_price-alerts" config-type="global_config" config-value="True"
+                     data-type="bool" checked>
+              <label for="notification_price-alerts">price-alerts</label>
+            </div></span>
+            <span><div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element" id="notification_trades"
+                     config-key="notification_trades" config-type="global_config" config-value="True"
+                     data-type="bool" checked>
+              <label for="notification_trades">trades</label>
+            </div></span>
+            <span><div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element" id="notification_trading-script-alerts"
+                     config-key="notification_trading-script-alerts" config-type="global_config" config-value="True"
+                     data-type="bool" checked>
+              <label for="notification_trading-script-alerts">trading-script-alerts</label>
+            </div></span>
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

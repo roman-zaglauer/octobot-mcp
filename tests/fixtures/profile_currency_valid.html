@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head><title>OctoBot /profile#panelCurrency (trimmed real fixture)</title></head>
+<body>
+<div class="tab-pane fade config-root" id="panelCurrency" role="tabpanel">
+  <div class="card-body deck-container">
+    <div class="card"><div class="card-body">
+      <label for="AddCurrencySelect">Add a cryptocurrency to trade:</label>
+      <select id="AddCurrencySelect"></select>
+      <button type="button" id="AddCurrency">Add</button>
+    </div></div>
+    <div class="card-deck config-container" update-url="/config">
+      <div class="card mb-3 medium-size config-card">
+        <div class="card-header">Bitcoin</div>
+        <div class="card-body" name="Bitcoin" config-key="crypto-currencies_Bitcoin">
+          <p class="card-text symbols my-0">
+            <span>Bitcoin : </span>
+            <span><div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element"
+                     config-key="crypto-currencies_Bitcoin_enabled" config-type="global_config"
+                     config-value="True" data-type="bool" id="crypto-currencies_Bitcoin_enabled" checked>
+              <label for="crypto-currencies_Bitcoin_enabled">enabled</label>
+            </div></span>
+            <span>
+              <select config-key="crypto-currencies_Bitcoin_pairs" config-type="global_config"
+                      config-value="[&#39;BTC/EUR&#39;]" class="editable config-element multi-select-element"
+                      data-type="list" multiple="multiple" id="crypto-currencies_Bitcoin_pairs">
+                <option value="BTC/EUR" selected="selected">BTC/EUR</option>
+              </select>
+            </span>
+          </p>
+        </div>
+      </div>
+      <div class="card mb-3 medium-size config-card">
+        <div class="card-header">Ethereum</div>
+        <div class="card-body" name="Ethereum" config-key="crypto-currencies_Ethereum">
+          <p class="card-text symbols my-0">
+            <span>Ethereum : </span>
+            <span><div class="custom-control custom-switch">
+              <input type="checkbox" class="custom-control-input config-element"
+                     config-key="crypto-currencies_Ethereum_enabled" config-type="global_config"
+                     config-value="False" data-type="bool" id="crypto-currencies_Ethereum_enabled">
+              <label for="crypto-currencies_Ethereum_enabled">enabled</label>
+            </div></span>
+            <span>
+              <select config-key="crypto-currencies_Ethereum_pairs" config-type="global_config"
+                      config-value="[&#39;ETH/BTC&#39;, &#39;ETH/USDT&#39;]"
+                      class="editable config-element multi-select-element" data-type="list" multiple="multiple"
+                      id="crypto-currencies_Ethereum_pairs">
+                <option value="ETH/BTC" selected="selected">ETH/BTC</option>
+                <option value="ETH/USDT" selected="selected">ETH/USDT</option>
+              </select>
+            </span>
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
