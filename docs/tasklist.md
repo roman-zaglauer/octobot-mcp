@@ -526,3 +526,100 @@ global project standards.
     `update_evaluator_config(patch={<that name>: not <its current enabled>})`
     and confirms the change — demonstrating the closed loop between the two
     tools this addendum exists to close.
+
+20. **`get_portfolio_snapshot`/`get_evaluation_matrix` — a fourth and fifth
+    Tier-B adapter, closing two gaps found via a live UI audit (ADR-0011).**
+    Not one of the original 14 milestones or any earlier addendum —
+    genuinely new scope, found this session by auditing OctoBot's own
+    `/portfolio` and `/advanced/matrix` pages directly (no existing tool
+    gives a current per-asset holdings breakdown or the live
+    evaluator/timeframe/symbol/exchange signal matrix). Traces to
+    FR-33/FR-34, NFR-19/NFR-20 (requirements doc) and the "Portfolio
+    snapshot & evaluation matrix" section of the tool spec, which is the
+    authoritative, implementable contract — implement against that section.
+
+    **Live verification is ALREADY DONE (mirroring milestone 19's own
+    "already done" pattern, not milestone 15/16/18's own "step 0, verify
+    first" pattern) — do not re-derive it.** ADR-0011's Context section
+    records, verbatim: the confirmed absence of any JSON API for either
+    feature (four plausible routes tried directly against each page, all
+    404 or an unchanged HTML body); the confirmed `/portfolio` DOM shape
+    (`#portfoliosCard`'s `reference_market` attribute,
+    `tr.symbol-holding` rows in `#holdings-table`, the rounded-cell-text
+    vs. full-precision-tooltip distinction, and the one column with no
+    tooltip at all); the confirmed `/advanced/matrix` DOM shape
+    (`#matrixDataTable`'s plain positional `<td>` cells, the confirmed
+    `<thead>` column order, and two real non-numeric cell cases: a literal
+    `"None"` value and an empty `time_frame`); and the direct evidence
+    ruling out a Socket.IO/Tier-C design for the matrix (no matrix-specific
+    namespace or push ever observed; `advanced_matrix.js` initializes
+    DataTables from HTML rows already present in the response, with no
+    `ajax`/`data` option and no listener). A developer should still fetch
+    both pages once more to build/validate test fixtures, but the design's
+    structural assumptions are settled, not open — the only genuinely open
+    items are requirements doc Q15 (multi-exchange tooltip format) and Q16
+    (server-side pagination at scale), neither of which blocks shipping
+    (see spec's "Open questions" section — both ship with documented,
+    honest fallback behavior rather than blocking).
+
+    **Implement, in this order:**
+    1. New error classes `PortfolioScrapeContractBrokenError` and
+       `EvaluationMatrixScrapeContractBrokenError` in `octobot_mcp.errors`
+       (before the modules below that raise them, per this project's
+       established ordering convention), following
+       `ProfileScrapeContractBrokenError`/`DataFileScrapeContractBrokenError`/
+       `EvaluatorScrapeContractBrokenError`'s exact documentation convention.
+    2. `get_portfolio_snapshot()` — add to `octobot_mcp.tools.portfolio`
+       alongside its existing Tier-A siblings (same domain — portfolio
+       reads), or its own small module if the developer judges the
+       BeautifulSoup-scrape machinery doesn't belong next to that module's
+       request/response helpers — developer's call, consistent with this
+       project's existing module-boundary judgment (see `list_evaluators`'s
+       own precedent for this exact choice). Parses `#portfoliosCard`'s
+       `reference_market` attribute and every `tr.symbol-holding` row in
+       `#holdings-table`; for each of `total`/`available`/`locked_in_orders`,
+       parses the cell's rounded display text AND attempts to parse its
+       `title` tooltip as one or more `"<Exchange>: <amount>"` pairs,
+       degrading to `exact: null, per_exchange: null` (never raising, never
+       guessing a split) when the tooltip doesn't match cleanly;
+       `value_in_reference_currency` is rounded-text-only (no tooltip exists
+       for this column, confirmed — do not add an `exact` key for it). Gate:
+       `PortfolioScrapeContractBrokenError` only on missing
+       table/reference-currency structure, never on zero assets.
+    3. `get_evaluation_matrix()` — add to `octobot_mcp.tools.trading_config`
+       alongside `list_evaluators` (same general domain — evaluator state),
+       or its own small module — developer's call, same precedent as above.
+       Parses `#matrixDataTable`'s `<thead>` (asserting the exact confirmed
+       column-name order before trusting positional extraction) and every
+       body `<tr>`'s 5 cells positionally: `evaluator`, `value` (numeric,
+       `null` for literal `"None"`, else passthrough raw string), `time_frame`
+       (`null` when the cell is empty), `symbol`, `exchange`. Gate:
+       `EvaluationMatrixScrapeContractBrokenError` only on a missing table or
+       a `<thead>` mismatch (or a row with ≠5 cells), never on zero entries.
+    4. Register both tools (`register_all`), update `README.md`'s tool
+       count/list and `server.py`'s `INSTRUCTIONS` constant, following this
+       project's established practice of keeping both in sync with every new
+       tool.
+    5. Tests, fixture-based (mirroring `list_profiles`/`list_data_files`/
+       `list_evaluators`'s own test structure): for each adapter, a valid
+       fixture built from this session's real captures (including the
+       matrix's real `"None"`-value and empty-`time_frame` rows, and the
+       portfolio's real single-exchange tooltip shape); a zero-rows-but-
+       intact fixture for each, asserting this does NOT raise; a
+       deliberately-broken fixture for each (missing table/attribute, or —
+       for the matrix — a reordered/renamed `<thead>`), asserting the
+       correct distinct exception IS raised; a portfolio fixture with an
+       unparseable/malformed tooltip, asserting graceful `exact: null,
+       per_exchange: null` degradation rather than a raised error or a
+       guessed split.
+
+    **Demo:** agent calls `get_portfolio_snapshot`, gets back every
+    currently-held asset with its reference-currency value and
+    available/locked breakdown in one call (replacing the
+    three-tools-cross-referenced workaround this addendum exists to close);
+    agent calls `get_evaluation_matrix`, gets back every active
+    evaluator's current signal value per timeframe/symbol/exchange in one
+    call (replacing the `export_logs`-grepping workaround this addendum
+    exists to close), and cross-checks one row's `evaluator` name against
+    `list_evaluators`'s own output to confirm the two tools agree on
+    evaluator naming.

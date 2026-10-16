@@ -89,7 +89,7 @@ claude mcp add octobot --env OCTOBOT_BASE_URL=http://192.168.178.100:5001 -- /ab
 ```
 
 Then run `/mcp` inside a Claude Code session to confirm `octobot` is
-connected and lists 47 tools.
+connected and lists 49 tools.
 
 ## Available tools
 
@@ -105,7 +105,12 @@ connected and lists 47 tools.
   `get_pnl_history`, `get_historical_portfolio_value`, `cancel_order`,
   `close_position`, `refresh_portfolio`, `clear_orders_history` (confirm-gated),
   `clear_trades_history` (confirm-gated), `clear_portfolio_history`
-  (confirm-gated), `clear_transactions_history` (confirm-gated)
+  (confirm-gated), `clear_transactions_history` (confirm-gated),
+  `get_portfolio_snapshot` (task 20, ADR-0011 — a fourth Tier-B HTML-scrape
+  read adapter; a current per-asset holdings breakdown — asset, total,
+  value in the profile's reference currency, available, locked-in-orders —
+  in one call, closing a gap the other portfolio tools above couldn't close
+  directly)
 - **Exchanges**: `get_currency_list`, `get_all_currencies`, `get_all_symbols`,
   `check_accounts_compatible`, `get_exchange_details`,
   `update_exchange_credentials` (confirm-gated)
@@ -115,6 +120,10 @@ connected and lists 47 tools.
   adapter, originally recommended NO-GO then reversed to GO by explicit user
   decision; enumerates every evaluator's name/activation state/category,
   closing `update_evaluator_config`'s own companion-read gap),
+  `get_evaluation_matrix` (task 20, ADR-0011 — a fifth Tier-B HTML-scrape
+  read adapter; OctoBot's live every-evaluator/timeframe/symbol/exchange
+  signal-value table in one call, closing a gap previously only
+  reconstructable by grepping `export_logs`' `MATRIX` log lines),
   `export_logs`, `list_tentacles` (stub — no JSON API exists), `get_logs`
   (stub — no JSON API exists)
 - **Historical data collection** (async — `start_data_collection` reuses
@@ -177,7 +186,7 @@ to whatever the MCP client captures from the subprocess.
 pytest
 ```
 
-371 tests, no live instance required — every test mocks the OctoBot HTTP/
+393 tests, no live instance required — every test mocks the OctoBot HTTP/
 Socket.IO layer. Live verification against a real instance was done
 per-milestone during development (see each milestone's commit message). CI
 runs this same suite on every push and pull request (see the CI badge above).

@@ -300,6 +300,114 @@ listed under the requirements doc's "Out of scope" section.
 
 ---
 
+### Portfolio snapshot & evaluation matrix (addendum — ADR-0011; genuinely new scope, found via a live UI audit, not in v1's original inventory)
+
+| Tool | R/W | Confirm | Maps to | Tier |
+|---|---|---|---|---|
+| `get_portfolio_snapshot()` | R | no | scrape `GET /portfolio` (bare) | Tier B — [V-live, this session] |
+| `get_evaluation_matrix()` | R | no | scrape `GET /advanced/matrix` (bare) | Tier B — [V-live, this session] |
+
+Both confirmed, this session, to have **no JSON API**: `GET /api/portfolio`,
+`/api/portfolios`, `/api/portfolio_assets`, `/portfolio?format=json` (for the
+first) and `GET /api/matrix`, `/api/evaluation_matrix`,
+`/advanced/matrix_data`, `/advanced/matrix?format=json` (for the second) were
+each fetched directly from the live instance's own page context — every one
+returned OctoBot's HTML 404-fallback page or the unchanged bare-page HTML,
+never JSON (ADR-0011, Context). Both pages' own client-side JS was also
+inspected via chrome-devtools `list_network_requests`/the pages' own fetched
+`.js` files (`portfolio.js`/`advanced_matrix.js`/`dom_updater.js`) to confirm
+neither is populated by a Socket.IO push — the asset table and the matrix
+table are both embedded directly in their page's initial server-rendered
+HTML, re-fetched as a whole bare page on refresh (ADR-0011 rules out a
+Tier-C/socket-listener design for the matrix with direct evidence, not
+inference from the `export_logs`-grepping workaround this gap was originally
+found through).
+
+#### `get_portfolio_snapshot()`
+- Input: `{}`.
+- Maps to `GET /portfolio` (bare — the same route a human visits; no
+  separate fragment/JSON route exists, confirmed [V-live]). Scrapes
+  `#portfoliosCard`'s `reference_market` attribute and every
+  `tr.symbol-holding` row inside `#holdings-table`/`#portfolio-display`.
+- Output: `{"reference_currency": str, "assets": [{"asset": str, "total":
+  {"rounded": float, "exact": float|null, "per_exchange":
+  [{"exchange": str, "amount": float}]|null}, "value_in_reference_currency":
+  {"rounded": float}, "available": <same shape as "total">,
+  "locked_in_orders": <same shape as "total">}]}`.
+  - `rounded` is always populated (the displayed cell text, parsed as a
+    float) [V-live].
+  - `exact`/`per_exchange` for `total`/`available`/`locked_in_orders` are
+    populated **only** when that cell's `title` tooltip attribute parses
+    cleanly as one or more `"<Exchange>: <amount>"` pairs (confirmed [V-live]
+    for the single-exchange case: `title="Binance: 195.90814133"` against a
+    displayed, rounded `"195.908"`) — `null` otherwise, never a guessed
+    split. **[UNVERIFIED] multi-exchange separator format** — requirements
+    doc open question #15; do not implement a specific separator-splitting
+    rule beyond the single-pair case without confirming it against a real
+    multi-exchange account first.
+  - `value_in_reference_currency` carries **only** `rounded` — confirmed
+    [V-live] that this column's `<td class="total-value ...">` has no
+    `title`/tooltip attribute at all on this OctoBot version, so there is no
+    full-precision source for it via this route. Do not add an `exact` key
+    for this field; its absence is the documented, correct behavior, not an
+    oversight.
+- Errors: `PortfolioScrapeContractBrokenError` if `#holdings-table`/
+  `#portfolio-display` is missing, a row is missing its `.symbol` span, or
+  `#portfoliosCard`'s `reference_market` attribute is missing. **Never**
+  raised for zero `assets` (a legitimately empty portfolio) — mirrors
+  `list_profiles`/`list_data_files`/`list_evaluators`'s INV-5-style
+  discipline, but with a different "what's legitimately empty" boundary (see
+  ADR-0011 Decision 3).
+- Idempotent, read-only, not confirm-gated.
+
+#### `get_evaluation_matrix()`
+- Input: `{}`.
+- Maps to `GET /advanced/matrix` (bare — same route a human visits; no
+  separate JSON route, no Socket.IO push into this table after initial load,
+  both confirmed [V-live], see this section's intro). Scrapes
+  `#matrixDataTable`'s `<thead>` (asserting column-name text matches exactly)
+  and every body `<tr>`'s 5 plain, unattributed `<td>` cells, positionally.
+- Output: `{"entries": [{"evaluator": str, "value": float|null|str,
+  "time_frame": str|null, "symbol": str, "exchange": str}]}`, one entry per
+  scraped row, in the document order OctoBot renders them.
+  - `value`: the cell text parsed as a JSON number when numeric; `null` when
+    the cell text is exactly the literal string `"None"` (confirmed
+    [V-live] real case: `InstantFluctuationsEvaluator`'s `1m` row, not yet
+    evaluated at scrape time); for any other non-numeric, non-`"None"` text
+    (not observed live, but not ruled out), pass through the raw string
+    rather than drop the row or raise — same "never invent, never silently
+    drop" discipline as NFR-8.
+  - `time_frame`: the cell text, or `null` when the cell is empty (confirmed
+    [V-live] real case: `MoveSignalsStrategyEvaluator`'s row — a
+    strategy-level evaluator has no single timeframe of its own; this is a
+    legitimate OctoBot state, not a broken scrape).
+  - `symbol`/`exchange`: the cell text verbatim (confirmed [V-live]:
+    `"BTC/EUR"`/`"binance"`).
+- Errors: `EvaluationMatrixScrapeContractBrokenError` if `#matrixDataTable`
+  is missing, its `<thead>` column-name text doesn't match
+  `["Evaluator", "Value", "Time frame", "Symbol", "Exchange"]` exactly and in
+  order, or any body row has a cell count other than 5. **Never** raised for
+  zero `entries` (a freshly started OctoBot, or one with no active
+  evaluators, legitimately shows nothing yet) — a materially weaker "what's
+  legitimately empty" invariant than every prior Tier-B adapter's, since
+  there is no "OctoBot always ships at least one" guarantee here (ADR-0011
+  Decision 3).
+- **Known structural weakness, stated plainly (ADR-0011 Consequences):**
+  unlike every other Tier-B adapter in this project, this page's cells carry
+  no stable per-row/per-cell attribute to anchor on — extraction is
+  positional, guarded only by the `<thead>` text-match assertion above. A
+  future OctoBot version that reorders columns without also renaming their
+  headers would slip through undetected. No stronger signal exists on this
+  page to build on; do not add a false sense of robustness beyond the
+  header-text check.
+- **[UNVERIFIED]** whether this table is ever server-side paginated at a
+  scale larger than the 8 real rows observed live (requirements doc open
+  question #16) — not blocking for implementation, but the tool's own
+  docstring should not claim completeness beyond what was actually verified.
+- Idempotent, read-only, not confirm-gated.
+
+---
+
 ### Tentacles & logs
 
 | Tool | R/W | Confirm | Maps to | Tier |
@@ -786,11 +894,21 @@ developer must trigger one real restart against the live instance to
 resolve this before finalizing `wait_for_octobot_ready`'s defaults/polling
 route.
 
+Portfolio-snapshot/evaluation-matrix open questions (requirements doc 15–16,
+ADR-0011) — **not blocking for initial implementation**, unlike every prior
+addendum's own open questions, since both tools' core structure is already
+[V-live] confirmed and their fail-loud gates don't depend on either question:
+`get_portfolio_snapshot`'s multi-exchange tooltip separator format (Q15 —
+ships with graceful `null` degradation until resolved) and whether
+`/advanced/matrix` is ever server-side paginated at scale (Q16 — not
+verifiable without a heavily-configured live instance).
+
 ## Hand-off
 - Traced requirements: FR-1..FR-20, NFR-1..NFR-12 (requirements doc); the
   historical-data-collection addendum additionally traces to FR-22..FR-27,
   NFR-13..NFR-15; the instance-lifecycle addendum (ADR-0010) additionally
-  traces to FR-30..FR-31, NFR-17.
+  traces to FR-30..FR-31, NFR-17; the portfolio-snapshot/evaluation-matrix
+  addendum (ADR-0011) additionally traces to FR-33..FR-34, NFR-19..NFR-20.
 - Implementer: `developer` agent, sequenced per `docs/tasklist.md`.
 - Test coverage expectations: every ETA branch (unit, synthetic sequences),
   every confirm-gated tool (unit, with/without flag), the watcher's lock
@@ -802,4 +920,12 @@ route.
   wiring the full watcher, a unit test for the step-progress conversion
   formula's boundary values (0 steps, `current_step == total_steps`, a
   clamp-triggering out-of-range input), and a broken-fixture test proving
-  `list_data_files` fails loud (mirroring `list_profiles`'s own).
+  `list_data_files` fails loud (mirroring `list_profiles`'s own). For the
+  portfolio-snapshot/evaluation-matrix addendum: fixtures built from this
+  session's own [V-live] captures (including the real `"None"`-value and
+  empty-`time_frame` matrix rows, and the real single-exchange tooltip
+  shape), a broken-fixture test per adapter proving each fails loud
+  (mirroring `list_profiles`'s own), and an explicit zero-rows-but-intact
+  fixture per adapter proving that case does NOT raise (mirroring
+  `list_evaluators`'s own empty-category test, but applied to a whole-table
+  empty case here rather than one category).

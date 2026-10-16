@@ -742,3 +742,42 @@ class EvaluatorScrapeContractBrokenError(OctoBotAPIError):
     See `octobot_mcp.tools.trading_config.list_evaluators` for the exact
     assumptions this guards.
     """
+
+
+class PortfolioScrapeContractBrokenError(OctoBotAPIError):
+    """The `GET /portfolio` HTML page's structure didn't match this
+    server's fourth Tier-B scrape adapter's expectations (ADR-0011, NFR-19).
+
+    Raised the moment any structural assumption is violated -- `#holdings-
+    table`/`#portfolio-display` missing, a row missing its `.symbol` span,
+    or `#portfoliosCard`'s `reference_market` attribute missing -- so a
+    scrape-contract drift surfaces as a loud, distinct, actionable failure.
+    **Deliberately NOT raised for zero `tr.symbol-holding` rows** -- a
+    legitimately empty portfolio (zero holdings anywhere) is a real OctoBot
+    state, unlike `ProfileScrapeContractBrokenError`'s "OctoBot always ships
+    built-in profiles" invariant. Named in parallel to, and never conflated
+    with, every other `*ScrapeContractBrokenError` above -- this project's
+    established one-domain-specific-exception-class-per-adapter convention.
+    See `octobot_mcp.tools.portfolio.get_portfolio_snapshot` for the exact
+    assumptions this guards.
+    """
+
+
+class EvaluationMatrixScrapeContractBrokenError(OctoBotAPIError):
+    """The `GET /advanced/matrix` HTML page's structure didn't match this
+    server's fifth Tier-B scrape adapter's expectations (ADR-0011, NFR-20).
+
+    Raised the moment the page-wide structural assumption is violated --
+    `#matrixDataTable` missing, its `<thead>` column-name text not matching
+    `["Evaluator", "Value", "Time frame", "Symbol", "Exchange"]` exactly and
+    in order, or any body row having a cell count other than 5. **Deliberately
+    NOT raised for zero entries** -- a freshly started OctoBot, or one with
+    no active evaluators, legitimately shows nothing yet; a materially
+    weaker "what's legitimately empty" invariant than every prior Tier-B
+    adapter's, since there is no "OctoBot always ships at least one"
+    guarantee here (ADR-0011 Decision 3). Named in parallel to, and never
+    conflated with, every other `*ScrapeContractBrokenError` above -- this
+    project's established one-domain-specific-exception-class-per-adapter
+    convention. See `octobot_mcp.tools.trading_config.get_evaluation_matrix`
+    for the exact assumptions this guards.
+    """

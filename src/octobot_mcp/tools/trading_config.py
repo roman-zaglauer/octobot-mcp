@@ -183,6 +183,66 @@ zero installed evaluators, rendering an intact but empty container). Do not
 special-case that in a way that changes this gate's whole-page scope.
 
 Read-only, not confirm-gated (ADR-0003).
+
+## `get_evaluation_matrix` (milestone 20, docs/tasklist.md item 20, ADR-0011, FR-34/NFR-20)
+
+A fifth Tier-B HTML-scrape read adapter, added here rather than its own
+module since the tool spec places it in this general domain (evaluator
+state) alongside `list_evaluators` above -- the same module-placement
+precedent `list_evaluators` itself set. Closes a gap where OctoBot's live
+every-evaluator/timeframe/symbol/exchange signal-value table was only
+reconstructable by grepping `export_logs`' `MATRIX` log lines.
+
+No JSON API exists for this page either (ADR-0011 Context: `GET
+/api/matrix`, `/api/evaluation_matrix`, `/advanced/matrix_data`,
+`/advanced/matrix?format=json` were all tried directly against the live
+instance and every one returned OctoBot's HTML 404-fallback page or the
+unchanged bare-page HTML, never JSON). ADR-0011 also directly rules out a
+Tier-C/socket-listener design for this page: no matrix-specific Socket.IO
+namespace or push was ever observed reaching the browser -- `GET
+/advanced/matrix` is rendered fresh, server-side, from OctoBot's in-memory
+matrix state, on every bare `GET`, exactly like every other Tier-B adapter
+in this project.
+
+**Confirmed DOM shape (ADR-0011 Context, OctoBot 2.1.1, re-verified this
+session against a fresh live capture, 8 real rows across 4 evaluators)**:
+`<table id="matrixDataTable" ...>`, with a `<thead>` whose literal `<th>`
+text, in order, is `"Evaluator" | "Value" | "Time frame" | "Symbol" |
+"Exchange"`, and one plain, UNattributed `<tr>` per entry in `<tbody>` --
+unlike every prior Tier-B adapter in this project, this page's cells carry
+no stable per-cell attribute to anchor on at all, so extraction here is
+positional, guarded only by the `<thead>` text-match assertion below. Two
+real, legitimate non-numeric cases are confirmed live, not hypothesized:
+`InstantFluctuationsEvaluator`'s row has `Value` rendered as the literal
+text `"None"` (not yet evaluated at scrape time -- mapped to `null`, not
+dropped or coerced to `0`); `MoveSignalsStrategyEvaluator`'s row has an
+EMPTY `Time frame` cell (a strategy-level evaluator has no single timeframe
+of its own -- mapped to `null`). Neither is a broken scrape.
+
+**`value`'s typed passthrough (ADR-0011 Decision 5)**: parsed as a JSON
+number when the cell text is numeric, `null` when the cell text is exactly
+the literal string `"None"`, and -- for any other non-numeric, non-`"None"`
+text (not observed live, but not ruled out either) -- passed through as the
+raw string rather than dropped or coerced, the same "never invent, never
+silently drop" discipline NFR-8 already established elsewhere.
+
+**Fail-loud gate (NFR-20), deliberately scoped like `list_evaluators`'s own
+"whole-page" model, not `ProfileScrapeContractBrokenError`'s "zero is
+always broken" one**: `EvaluationMatrixScrapeContractBrokenError` is raised
+only if `#matrixDataTable` is missing, its `<thead>` column-name text
+doesn't match `["Evaluator", "Value", "Time frame", "Symbol", "Exchange"]`
+exactly and in order, or any body row has a cell count other than 5 --
+**never** for zero `entries` (a freshly started OctoBot, or one with no
+active evaluators, legitimately shows nothing yet -- a materially weaker
+"what's legitimately empty" invariant than every prior Tier-B adapter's,
+since there is no "OctoBot always ships at least one" guarantee here).
+
+**`[UNVERIFIED]`** whether this table is ever server-side paginated at a
+scale larger than the 8 real rows observed live (requirements doc open
+question #16) -- not blocking for implementation; this adapter's own
+docstring does not claim completeness beyond what was actually verified.
+
+Idempotent, read-only, not confirm-gated (ADR-0003).
 """
 
 from typing import Any
@@ -194,6 +254,7 @@ from mcp.server.mcpserver.context import Context
 
 from octobot_mcp.context import get_client
 from octobot_mcp.errors import (
+    EvaluationMatrixScrapeContractBrokenError,
     EvaluatorConfigUpdateRejectedError,
     EvaluatorScrapeContractBrokenError,
     OctoBotClientError,
@@ -545,8 +606,162 @@ async def list_evaluators(ctx: Context) -> Any:
     return {"evaluators": _parse_evaluator_config_html(html)}
 
 
+# --- get_evaluation_matrix: fifth Tier-B scrape adapter (task 20, ADR-0011) --
+
+_MATRIX_PATH = "/advanced/matrix"
+
+#: ADR-0011's confirmed `<thead>` column order -- the only structural guard
+#: available on this page (see this module's docstring: cells carry no
+#: stable per-row/per-cell attribute to anchor on at all).
+_MATRIX_EXPECTED_HEADERS = ["Evaluator", "Value", "Time frame", "Symbol", "Exchange"]
+
+
+async def _fetch_matrix_html(client: httpx.AsyncClient) -> str:
+    """Fetch `GET /advanced/matrix`'s raw HTML body.
+
+    Mirrors `_fetch_evaluator_config_html` above (independently duplicated,
+    not shared -- this project's established convention): this route
+    renders HTML, not JSON.
+    """
+    try:
+        response = await client.request("GET", _MATRIX_PATH)
+    except httpx.TimeoutException as exc:
+        raise OctoBotTimeoutError(f"Request to OctoBot timed out: GET {_MATRIX_PATH}") from exc
+    except httpx.HTTPError as exc:
+        raise OctoBotConnectionError(f"Could not reach OctoBot: GET {_MATRIX_PATH} ({exc})") from exc
+
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} for GET {_MATRIX_PATH}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot returned client error {response.status_code} for GET {_MATRIX_PATH}",
+            status_code=response.status_code,
+        )
+    return response.text
+
+
+def _parse_matrix_value(text: str) -> float | None | str:
+    """Typed passthrough for one matrix row's `Value` cell (ADR-0011 Decision 5).
+
+    `null` for the literal string `"None"` (confirmed real case: an
+    evaluator not yet evaluated at scrape time); a JSON number when the
+    text is numeric; otherwise the raw string passed through unchanged --
+    never dropped, never coerced -- for any other non-numeric, non-`"None"`
+    text (not observed live, but not ruled out either).
+    """
+    if text == "None":
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def _parse_matrix_html(html: str) -> list[dict[str, Any]]:
+    """Parse `/advanced/matrix`'s rendered HTML into entry dicts (fail-loud, NFR-20).
+
+    See this module's docstring (the `get_evaluation_matrix` section) for
+    the exact DOM shape and the full list of assumptions asserted here.
+    Raises `EvaluationMatrixScrapeContractBrokenError` -- never a
+    partial/best-effort list -- the instant a structural assumption doesn't
+    hold. Zero body rows is NOT such an assumption (ADR-0011 Decision 3): a
+    legitimately empty matrix returns `[]`.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find(id="matrixDataTable")
+    if table is None:
+        raise EvaluationMatrixScrapeContractBrokenError(
+            f"No element with id='matrixDataTable' found on {_MATRIX_PATH}. "
+            "This means the page structure has changed -- verify against "
+            "the current OctoBot version (see octobot_mcp.tools.trading_config's "
+            "module docstring for the last-confirmed version)."
+        )
+
+    thead = table.find("thead")
+    header_texts = [th.get_text(strip=True) for th in thead.find_all("th")] if thead is not None else []
+    if header_texts != _MATRIX_EXPECTED_HEADERS:
+        raise EvaluationMatrixScrapeContractBrokenError(
+            f"#matrixDataTable's <thead> column names are {header_texts!r}, "
+            f"expected exactly {_MATRIX_EXPECTED_HEADERS!r} in that order -- "
+            "this is the only structural guard available on this page (it "
+            "has no stable per-cell attribute to anchor on, see this "
+            "module's docstring), so a mismatch here means the page "
+            "structure has changed."
+        )
+
+    tbody = table.find("tbody")
+    rows = tbody.find_all("tr") if tbody is not None else []
+
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        cells = row.find_all("td")
+        if len(cells) != 5:
+            raise EvaluationMatrixScrapeContractBrokenError(
+                f"Expected exactly 5 <td> cells per matrix row, found {len(cells)}."
+            )
+        evaluator, value_text, time_frame_text, symbol, exchange = (
+            cell.get_text(strip=True) for cell in cells
+        )
+        entries.append(
+            {
+                "evaluator": evaluator,
+                "value": _parse_matrix_value(value_text),
+                "time_frame": time_frame_text or None,
+                "symbol": symbol,
+                "exchange": exchange,
+            }
+        )
+    return entries
+
+
+@with_error_handling
+async def get_evaluation_matrix(ctx: Context) -> Any:
+    """Read OctoBot's live evaluation matrix: every active evaluator's
+    current signal value per timeframe/symbol/exchange.
+
+    Tier-B (ADR-0011): scrapes `GET /advanced/matrix` -- see this module's
+    docstring (the `get_evaluation_matrix` section) for the verified DOM
+    shape, the ruled-out Tier-C/socket-listener design, and the fail-loud
+    assumptions. Idempotent, read-only, not confirm-gated.
+
+    Output: `{"entries": [{"evaluator": str, "value": float|null|str,
+    "time_frame": str|null, "symbol": str, "exchange": str}]}`, one entry
+    per scraped row, in the document order OctoBot renders them.
+
+    `value`: the cell text parsed as a JSON number when numeric; `null`
+    when the cell text is exactly the literal string `"None"` (confirmed
+    real case: an evaluator not yet evaluated at scrape time); for any
+    other non-numeric, non-`"None"` text, the raw string is passed through
+    rather than dropped or coerced. `time_frame`: the cell text, or `null`
+    when the cell is empty (confirmed real case: a strategy-level evaluator
+    has no single timeframe of its own).
+
+    Raises `EvaluationMatrixScrapeContractBrokenError` if `#matrixDataTable`
+    is missing, its `<thead>` column-name text doesn't match
+    `["Evaluator", "Value", "Time frame", "Symbol", "Exchange"]` exactly
+    and in order, or any body row has a cell count other than 5 -- never
+    for zero `entries` (a freshly started OctoBot, or one with no active
+    evaluators, legitimately shows nothing yet).
+
+    **Known structural weakness, stated plainly**: unlike every other
+    Tier-B adapter in this project, this page's cells carry no stable
+    per-row/per-cell attribute to anchor on -- extraction is positional,
+    guarded only by the `<thead>` text-match assertion above. Also
+    `[UNVERIFIED]` whether this table is ever server-side paginated at a
+    scale larger than the 8 rows this adapter was verified against
+    (requirements doc open question #16) -- not blocking, but this result
+    should not be assumed complete on a heavily-configured instance.
+    """
+    html = await _fetch_matrix_html(get_client(ctx))
+    return {"entries": _parse_matrix_html(html)}
+
+
 def register(mcp: MCPServer) -> None:
     """Register this module's tools onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
     mcp.tool()(update_trading_config)
     mcp.tool()(update_evaluator_config)
     mcp.tool()(list_evaluators)
+    mcp.tool()(get_evaluation_matrix)

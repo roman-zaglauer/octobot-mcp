@@ -90,26 +90,96 @@ reasoning that these are routine, expected trading-bot actions, not the
 kind of rare/catastrophic mistake confirm-gating protects against
 elsewhere. Neither has a `confirm` parameter at all.
 
+## `get_portfolio_snapshot` (milestone 20, docs/tasklist.md item 20, ADR-0011, FR-33/NFR-19)
+
+A fourth Tier-B HTML-scrape read adapter (mirroring
+`octobot_mcp.tools.profiles`/`octobot_mcp.tools.data_collection`/
+`octobot_mcp.tools.trading_config.list_evaluators`'s own adapters), added
+here rather than its own module since the tool spec places it in this
+module's domain (portfolio reads) alongside this module's existing
+Tier-A siblings -- same precedent `list_evaluators` set for
+`trading_config.py`. Closes a gap where no existing tool gave a current
+per-asset holdings breakdown directly: `get_historical_portfolio_value` is
+a time-series of TOTAL value in one currency; `get_orders`/`get_positions`/
+`get_trades` give no current per-asset breakdown at all.
+
+No JSON API exists for this page (ADR-0011 Context: `GET /api/portfolio`,
+`/api/portfolios`, `/api/portfolio_assets`, `/portfolio?format=json` were
+all tried directly against the live instance and every one returned
+OctoBot's HTML 404-fallback page or the unchanged bare-page HTML, never
+JSON) -- so this scrapes `GET /portfolio`'s own bare, server-rendered HTML
+with BeautifulSoup instead, exactly like every other Tier-B adapter in this
+project.
+
+**Confirmed DOM shape (ADR-0011 Context, OctoBot 2.1.1, re-verified this
+session against a fresh live capture)**: `<div id="portfoliosCard" ...
+reference_market="EUR">` carries the profile's reference currency as an
+attribute. Each held asset is one `<tr class="symbol-holding text-center">`
+inside `<table id="holdings-table">` (itself inside `#portfolio-display`),
+with exactly 5 `<td>` cells in document order: asset (a nested
+`<span class="symbol">`), total, value-in-reference-currency, available,
+locked-in-orders. The total/available/locked-in-orders cells each carry
+`data-toggle="tooltip" title="<Exchange>: <amount>"` with the
+full-precision raw value (confirmed live: displayed/rounded cell text
+`"195.908"` vs. tooltip `title="Binance: 195.90814133"`); the
+value-in-reference-currency cell (class `total-value`) carries NO
+`title`/tooltip attribute at all on this OctoBot version -- there is no
+full-precision source for that one column via this route, so this
+adapter deliberately never adds an `exact` key for it.
+
+**Per-exchange tooltip parsing (ADR-0011 Decision 4, requirements doc open
+question #15, `[UNVERIFIED]`)**: the live test instance has exactly one
+connected exchange, so only a single `"<Exchange>: <amount>"` pair was ever
+observed in a tooltip -- how OctoBot renders this `title` when an asset is
+held across >=2 exchanges (comma/semicolon/newline-separated? some other
+shape?) is unconfirmed and must not be guessed. This adapter therefore
+parses a tooltip ONLY when it cleanly matches the single confirmed
+`"<exchange>: <amount>"` shape (one colon, both sides non-empty, the
+amount side parsing as a float) -- `total`/`available`/`locked_in_orders`
+then carry `exact`/`per_exchange` populated from that one pair. Any
+tooltip that doesn't match this cleanly (missing, multiple candidate
+values, a non-numeric amount) degrades to `exact: null, per_exchange:
+null` -- NEVER raised, NEVER a guessed split -- the `rounded` value is
+still always correctly extracted either way (`rounded` comes from the
+cell's own display text, parsed independently of the tooltip).
+
+**Fail-loud gate (NFR-19), deliberately scoped differently than
+`ProfileScrapeContractBrokenError`'s "zero is always broken" model**:
+`PortfolioScrapeContractBrokenError` is raised only if `#portfoliosCard`
+is missing, its `reference_market` attribute is missing/empty,
+`#holdings-table` is missing, a row is missing its `.symbol` span, or a
+row's cell count isn't exactly 5 -- **never** for zero `tr.symbol-holding`
+rows (a legitimately empty portfolio, zero holdings anywhere, is a real
+OctoBot state, confirmed by ADR-0011 Decision 3 -- unlike
+`list_profiles`'s "OctoBot always ships built-in profiles" invariant).
+
+Idempotent, read-only, not confirm-gated (ADR-0003).
+
 No `from __future__ import annotations` here: see
 `octobot_mcp.tools._shared.with_error_handling`'s docstring for why
 postponed annotations would silently break this module's Context
 injection.
 """
 
+import re
 from typing import Any
 
 import httpx2 as httpx
+from bs4 import BeautifulSoup
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 
 from octobot_mcp.client import request_json
 from octobot_mcp.context import get_client
 from octobot_mcp.errors import (
+    OctoBotClientError,
     OctoBotConnectionError,
     OctoBotMalformedResponseError,
+    OctoBotServerError,
     OctoBotTimeoutError,
     OrderCancelRejectedError,
     PortfolioRefreshFailedError,
+    PortfolioScrapeContractBrokenError,
     PositionCloseRejectedError,
 )
 from octobot_mcp.tools._shared import require_confirmation, with_error_handling
@@ -493,6 +563,200 @@ async def refresh_portfolio(ctx: Context) -> Any:
         ) from exc
 
 
+# --- milestone 20: get_portfolio_snapshot (ADR-0011, Tier B) ----------------
+
+_PORTFOLIO_PATH = "/portfolio"
+
+#: ADR-0011's one confirmed tooltip shape: a single `"<Exchange>: <amount>"`
+#: pair, nothing more. Deliberately does NOT attempt to split on any
+#: separator for a hypothetical multi-exchange tooltip -- requirements doc
+#: open question #15 is unresolved, so a tooltip that doesn't match this
+#: exactly (whole-string, one colon, both sides non-empty) degrades to
+#: `exact: null, per_exchange: null` rather than guessing a split.
+_SINGLE_EXCHANGE_TOOLTIP_RE = re.compile(r"^\s*([^:]+):\s*(\S+)\s*$")
+
+
+async def _fetch_portfolio_html(client: httpx.AsyncClient) -> str:
+    """Fetch `/portfolio`'s raw HTML body, classified like `request_json` (NFR-4).
+
+    Mirrors `octobot_mcp.tools.profiles._fetch_profiles_selector_html`'s
+    identically-purposed helper (independently duplicated, not imported --
+    this project's established convention): this route renders HTML, not
+    JSON, so `octobot_mcp.client.request_json` can't be reused here.
+    """
+    try:
+        response = await client.request("GET", _PORTFOLIO_PATH)
+    except httpx.TimeoutException as exc:
+        raise OctoBotTimeoutError(f"Request to OctoBot timed out: GET {_PORTFOLIO_PATH}") from exc
+    except httpx.HTTPError as exc:
+        raise OctoBotConnectionError(f"Could not reach OctoBot: GET {_PORTFOLIO_PATH} ({exc})") from exc
+
+    if response.status_code >= 500:
+        raise OctoBotServerError(
+            f"OctoBot returned server error {response.status_code} for GET {_PORTFOLIO_PATH}",
+            status_code=response.status_code,
+        )
+    if response.status_code >= 400:
+        raise OctoBotClientError(
+            f"OctoBot returned client error {response.status_code} for GET {_PORTFOLIO_PATH}",
+            status_code=response.status_code,
+        )
+    return response.text
+
+
+def _parse_rounded_cell(cell: Any, *, asset: str, field: str) -> float:
+    """Parse one amount cell's displayed (rounded) text as a float -- always expected to succeed.
+
+    Raises `PortfolioScrapeContractBrokenError` if the cell's own displayed
+    text isn't numeric at all -- a genuine structural break (this is the
+    one value this adapter's own spec guarantees is "always populated"),
+    distinct from the tooltip's own best-effort, never-raising parse below.
+    """
+    text = cell.get_text(strip=True)
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise PortfolioScrapeContractBrokenError(
+            f"Could not parse asset {asset!r}'s {field!r} cell as a number: {text!r}."
+        ) from exc
+
+
+def _parse_tooltip_exact(cell: Any) -> tuple[float | None, list[dict[str, Any]] | None]:
+    """Best-effort parse of one amount cell's `title` tooltip (ADR-0011 Decision 4).
+
+    Returns `(exact, per_exchange)`, both `None` the instant the tooltip is
+    missing or doesn't cleanly match the one confirmed single-exchange
+    `"<Exchange>: <amount>"` shape -- NEVER raises, NEVER guesses a split
+    for an unconfirmed multi-exchange format (requirements doc open
+    question #15).
+    """
+    title = cell.get("title")
+    if not title:
+        return None, None
+    match = _SINGLE_EXCHANGE_TOOLTIP_RE.match(title)
+    if match is None:
+        return None, None
+    exchange, amount_text = match.group(1).strip(), match.group(2)
+    if not exchange:
+        return None, None
+    try:
+        amount = float(amount_text)
+    except ValueError:
+        return None, None
+    return amount, [{"exchange": exchange, "amount": amount}]
+
+
+def _parse_amount_cell(cell: Any, *, asset: str, field: str) -> dict[str, Any]:
+    """Parse one `total`/`available`/`locked_in_orders` cell into its full shape."""
+    rounded = _parse_rounded_cell(cell, asset=asset, field=field)
+    exact, per_exchange = _parse_tooltip_exact(cell)
+    return {"rounded": rounded, "exact": exact, "per_exchange": per_exchange}
+
+
+def _parse_portfolio_html(html: str) -> dict[str, Any]:
+    """Parse `/portfolio`'s rendered HTML into the snapshot shape (fail-loud, NFR-19).
+
+    See this module's docstring (the `get_portfolio_snapshot` section) for
+    the exact DOM shape and the full list of assumptions asserted here.
+    Raises `PortfolioScrapeContractBrokenError` -- never returns a
+    partial/best-effort result -- the instant a structural assumption
+    doesn't hold. Zero `tr.symbol-holding` rows is NOT such an assumption
+    (ADR-0011 Decision 3): a legitimately empty portfolio returns
+    `assets: []`.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    card = soup.find(id="portfoliosCard")
+    if card is None:
+        raise PortfolioScrapeContractBrokenError(
+            f"No element with id='portfoliosCard' found on {_PORTFOLIO_PATH}. "
+            "This means the page structure has changed -- verify against "
+            "the current OctoBot version (see octobot_mcp.tools.portfolio's "
+            "module docstring for the last-confirmed version)."
+        )
+    reference_currency = card.get("reference_market")
+    if not reference_currency:
+        raise PortfolioScrapeContractBrokenError(
+            "#portfoliosCard is missing its reference_market attribute."
+        )
+
+    table = soup.find(id="holdings-table")
+    if table is None:
+        raise PortfolioScrapeContractBrokenError(
+            f"No element with id='holdings-table' found on {_PORTFOLIO_PATH}. "
+            "This means the page structure has changed, not that the "
+            "portfolio is empty (a legitimately empty portfolio still "
+            "renders an intact, empty holdings-table -- see this module's "
+            "docstring)."
+        )
+
+    assets: list[dict[str, Any]] = []
+    for row in table.find_all("tr", class_="symbol-holding"):
+        symbol_span = row.find("span", class_="symbol")
+        if symbol_span is None:
+            raise PortfolioScrapeContractBrokenError(
+                "A tr.symbol-holding row is missing its .symbol span."
+            )
+        asset = symbol_span.get_text(strip=True)
+
+        cells = row.find_all("td")
+        if len(cells) != 5:
+            raise PortfolioScrapeContractBrokenError(
+                f"Expected exactly 5 <td> cells per holding row, found "
+                f"{len(cells)} for asset {asset!r}."
+            )
+
+        assets.append(
+            {
+                "asset": asset,
+                "total": _parse_amount_cell(cells[1], asset=asset, field="total"),
+                "value_in_reference_currency": {
+                    "rounded": _parse_rounded_cell(
+                        cells[2], asset=asset, field="value_in_reference_currency"
+                    )
+                },
+                "available": _parse_amount_cell(cells[3], asset=asset, field="available"),
+                "locked_in_orders": _parse_amount_cell(cells[4], asset=asset, field="locked_in_orders"),
+            }
+        )
+
+    return {"reference_currency": reference_currency, "assets": assets}
+
+
+@with_error_handling
+async def get_portfolio_snapshot(ctx: Context) -> Any:
+    """Read a current per-asset portfolio snapshot (asset, total, value in
+    the profile's reference currency, available, locked-in-orders).
+
+    Tier-B (ADR-0011): scrapes `GET /portfolio` -- see this module's
+    docstring (the `get_portfolio_snapshot` section) for the verified DOM
+    shape and fail-loud assumptions. Idempotent, read-only, not
+    confirm-gated.
+
+    Output: `{"reference_currency": str, "assets": [{"asset": str, "total":
+    {"rounded": float, "exact": float|null, "per_exchange": [{"exchange":
+    str, "amount": float}]|null}, "value_in_reference_currency": {"rounded":
+    float}, "available": <same shape as "total">, "locked_in_orders": <same
+    shape as "total">}]}`.
+
+    `exact`/`per_exchange` for `total`/`available`/`locked_in_orders` are
+    populated only when that cell's tooltip cleanly matches the one
+    confirmed single-exchange `"<Exchange>: <amount>"` shape -- `null`
+    otherwise (see this module's docstring for why the multi-exchange case
+    is `[UNVERIFIED]` and deliberately never guessed).
+    `value_in_reference_currency` carries only `rounded` -- this column has
+    no tooltip on this OctoBot version, confirmed live, so there is nothing
+    to parse; this is the documented, correct behavior, not an oversight.
+
+    Raises `PortfolioScrapeContractBrokenError` if `#holdings-table`/
+    `#portfolio-display`'s structure is missing, a row is missing its
+    `.symbol` span, or `#portfoliosCard`'s `reference_market` attribute is
+    missing -- never for zero `assets` (a legitimately empty portfolio).
+    """
+    html = await _fetch_portfolio_html(get_client(ctx))
+    return _parse_portfolio_html(html)
+
+
 def register(mcp: MCPServer) -> None:
     """Register this module's tools onto `mcp` (called once from `octobot_mcp.tools.register_all`)."""
     mcp.tool()(get_orders)
@@ -507,3 +771,4 @@ def register(mcp: MCPServer) -> None:
     mcp.tool()(cancel_order)
     mcp.tool()(close_position)
     mcp.tool()(refresh_portfolio)
+    mcp.tool()(get_portfolio_snapshot)

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head><title>OctoBot /portfolio (trimmed real fixture, OctoBot 2.1.1)</title></head>
+<body>
+<!-- Trimmed, real capture from the live test instance (GET /portfolio,
+     http://192.168.178.100:5001), confirmed against ADR-0011's documented
+     DOM shape -- not a hand-authored guess. Two real holdings observed:
+     BTC (full-precision tooltip, single-exchange "Binance: <amount>" shape)
+     and EUR (the account's reference currency, also held as a balance). -->
+<div class="card" id="portfoliosCard" reference_market="EUR">
+    <div class="card-header"><h2>Portfolio: <span class="rounded-number">203.78445638</span> EUR</h2></div>
+    <div class="card-body row mx-0 justify-content-center" id="portfolio-display">
+        <div class="col-12">
+            <table class="table table-striped table-responsive-sm" id="holdings-table">
+              <thead>
+                <tr class="text-center">
+                    <th scope="col">Asset</th>
+                    <th scope="col">Total</th>
+                    <th scope="col">Value in EUR</th>
+                    <th scope="col">Available</th>
+                    <th scope="col">Locked in orders</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="symbol-holding text-center">
+                    <td class="row mx-0">
+                        <div class="col col-md-5 animated px-2 fadeIn img-fluid very-small-size">
+                            <img class="card-img-top currency-image" src="/static/img/svg/loading_currency.svg" alt="BTC" data-symbol="btc">
+                        </div>
+                        <div class="d-none d-md-inline col-7 my-auto">
+                            <span class="symbol">BTC</span></div>
+                    </td>
+                    <td class="align-middle rounded-number" data-toggle="tooltip" title="Binance: 0.00010725">
+                        0.00010725
+                    </td>
+                    <td class="total-value align-middle rounded-number">7.87631505375</td>
+                    <td class="align-middle rounded-number" data-toggle="tooltip" title="Binance: 0.00000725">
+                        0.00000725
+                    </td>
+                    <td class="align-middle rounded-number" data-toggle="tooltip" title="Binance: 0.00010000">
+                        0.00010000
+                    </td>
+                </tr>
+                <tr class="symbol-holding text-center">
+                    <td class="row mx-0">
+                        <div class="col col-md-5 animated px-2 fadeIn img-fluid very-small-size">
+                            <img class="card-img-top currency-image" src="/static/img/svg/loading_currency.svg" alt="EUR" data-symbol="eur">
+                        </div>
+                        <div class="d-none d-md-inline col-7 my-auto">
+                            <span class="symbol">EUR</span></div>
+                    </td>
+                    <td class="align-middle rounded-number" data-toggle="tooltip" title="Binance: 195.90814133">
+                        195.90814133
+                    </td>
+                    <td class="total-value align-middle rounded-number">195.90814133</td>
+                    <td class="align-middle rounded-number" data-toggle="tooltip" title="Binance: 195.90814133">
+                        195.90814133
+                    </td>
+                    <td class="align-middle rounded-number" data-toggle="tooltip" title="Binance: 0E-8">
+                        0E-8
+                    </td>
+                </tr>
+              </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+</body>
+</html>

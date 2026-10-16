@@ -77,7 +77,7 @@ from mcp import Client
 
 from octobot_mcp.server import mcp
 
-EXPECTED_TASK_19_TOOL_NAMES = {
+EXPECTED_TASK_20_TOOL_NAMES = {
     "get_orders",
     "get_positions",
     "get_trades",
@@ -125,6 +125,8 @@ EXPECTED_TASK_19_TOOL_NAMES = {
     "restart_octobot",
     "wait_for_octobot_ready",
     "list_evaluators",
+    "get_portfolio_snapshot",
+    "get_evaluation_matrix",
 }
 
 
@@ -141,9 +143,9 @@ async def client(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_server_lists_the_task_19_tools(client: Client):
+async def test_server_lists_the_task_20_tools(client: Client):
     result = await client.list_tools()
-    assert {tool.name for tool in result.tools} == EXPECTED_TASK_19_TOOL_NAMES
+    assert {tool.name for tool in result.tools} == EXPECTED_TASK_20_TOOL_NAMES
 
 
 @pytest.mark.anyio

@@ -58,7 +58,12 @@ for an exchange (for valid symbols, reuse the existing `get_all_symbols`).
 `get_pnl_history`/`get_historical_portfolio_value` are reads; \
 `cancel_order`/`close_position`/`refresh_portfolio` are routine, ungated \
 trading actions; the `clear_*_history` tools are irreversible and \
-confirm-gated.
+confirm-gated; `get_portfolio_snapshot` returns a current per-asset \
+holdings breakdown (asset, total, value in the profile's reference \
+currency, available, locked-in-orders) by scraping OctoBot's own \
+`/portfolio` page -- the one call this server has for that, where the \
+reads above each give only a slice (orders/positions/trades, or a \
+total-value time series).
 - Exchanges: currency/symbol lookups and `check_accounts_compatible` are \
 reads; `get_exchange_details` returns only ONE exchange's details, never a \
 full list; `update_exchange_credentials` writes real API credentials and is \
@@ -73,7 +78,12 @@ activation state, category) by scraping OctoBot's own evaluator-config page \
 real log archive. `list_tentacles`/`get_logs` are honest stubs -- OctoBot \
 has no JSON API for either -- so they always return \
 `{"available": false, "reason": ..., "alternative": ...}` naming a real \
-alternative tool, instead of failing or guessing at a scrape.
+alternative tool, instead of failing or guessing at a scrape. \
+`get_evaluation_matrix` returns OctoBot's own live evaluation matrix -- \
+every active evaluator's current signal value per timeframe/symbol/\
+exchange -- by scraping OctoBot's `/advanced/matrix` page; cross-check an \
+entry's `evaluator` name against `list_evaluators`' own output if you need \
+to confirm the two agree on naming.
 - Instance lifecycle: `restart_octobot` (confirm-gated) triggers a full \
 OctoBot process restart -- narrowly scoped to unblocking evaluator-config- \
 tuning backtest validation (OctoBot caches a strategy's required-evaluators \
@@ -216,6 +226,21 @@ by restarting either, since the actual root cause is still unidentified. \
 See `docs/adr/0010-octobot-restart-capability.md`'s "Negative finding" for \
 the full account, including an open question of whether to keep this \
 capability at all now that its stated purpose doesn't hold.
+- `get_portfolio_snapshot`'s `exact`/`per_exchange` fields (the \
+full-precision, per-exchange breakdown behind each rounded `total`/ \
+`available`/`locked_in_orders` value) are confirmed only for a \
+single-exchange holding -- how OctoBot formats this when one asset is held \
+across >=2 exchanges is UNVERIFIED (requirements doc open question #15). \
+A tooltip that doesn't match the one confirmed `"<Exchange>: <amount>"` \
+shape degrades to `exact: null, per_exchange: null` rather than guessing a \
+split -- `rounded` is always still correct either way.
+- `get_evaluation_matrix` has no stable per-cell attribute to anchor on at \
+all (unlike every other Tier-B scrape in this server) -- its only \
+structural guard is an exact `<thead>` column-name match. It is also \
+UNVERIFIED whether OctoBot ever paginates this table server-side on a \
+heavily-configured instance (requirements doc open question #16); only 8 \
+rows were observed live. Treat a very large `entries` list as a signal to \
+double-check completeness, not an assumed-complete snapshot.
 
 ## Safety
 

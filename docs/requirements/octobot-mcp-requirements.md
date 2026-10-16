@@ -79,6 +79,13 @@ tentacles/logs where a real endpoint exists.
 | FR-31 | The server SHALL provide a tool to poll for OctoBot's HTTP server becoming reachable again after a restart, honestly reporting a bounded timeout rather than blocking indefinitely or fabricating success (ADR-0010 Decision 5). | SHOULD | Given a bounded `timeout_seconds`/`poll_interval_seconds`, `wait_for_octobot_ready` returns `{"ready": true, "elapsed_seconds", "attempts"}` once a lightweight read route responds, or `{"ready": false, "elapsed_seconds", "attempts"}` on timeout — never raises for a timeout, and never claims the instance is "ready" for more than "the HTTP server answered" (see open question #14's cache-clear-timing caveat). |
 | FR-32 | The server SHALL provide a tool to enumerate every evaluator OctoBot knows about, including its current activation state and category, including the exact identifier `update_evaluator_config`'s `patch` keys expect (ADR-0009, reversed from its original NO-GO recommendation by explicit user decision). | SHOULD | Given the OctoBot instance has ≥1 evaluator installed (in any category), when `list_evaluators` is called, the result includes each evaluator's `name`/`enabled`/`type` via a Tier-B scrape of `GET /advanced/evaluator_config`; the tool raises a distinct, named error (`EvaluatorScrapeContractBrokenError`, never a silent empty list) only if zero evaluators are found across ALL FOUR category containers combined or an expected container is missing entirely — a single category legitimately having zero evaluators is not itself an error (confirmed live: this project's own test instance has zero "Scripted evaluators" installed). |
 
+### Portfolio snapshot & evaluation matrix (added addendum — genuinely new scope, ADR-0011; found via a live UI audit, not in v1's original curated scope)
+
+| ID | Requirement | Priority | Acceptance criterion |
+|---|---|---|---|
+| FR-33 | The server SHALL provide a tool to read a current per-asset portfolio snapshot (asset, total, value in the profile's reference currency, available, locked-in-orders), closing a gap where no existing tool gives this breakdown directly (ADR-0011). | SHOULD | Given the OctoBot instance holds ≥1 asset, when `get_portfolio_snapshot` is called, the result includes `reference_currency` and, per asset, `total`/`value_in_reference_currency`/`available`/`locked_in_orders`, each carrying at least a `rounded` value via a Tier-B scrape of `GET /portfolio`; the tool raises a distinct, named error (`PortfolioScrapeContractBrokenError`, never a silent empty list) only if the holdings table/reference-currency structure itself is missing — a legitimately empty portfolio (zero assets) is not itself an error. |
+| FR-34 | The server SHALL provide a tool to read OctoBot's live evaluation matrix (every active evaluator's current signal value per timeframe/symbol/exchange), closing a gap where this data was only reconstructable by grepping `export_logs`' `MATRIX` lines (ADR-0011). | SHOULD | When `get_evaluation_matrix` is called, the result includes one entry per `(evaluator, time_frame, symbol, exchange)` row with a `value` (number, `null` for OctoBot's own literal `"None"`, or the passthrough raw string for any other non-numeric text) via a Tier-B scrape of `GET /advanced/matrix`; the tool raises a distinct, named error (`EvaluationMatrixScrapeContractBrokenError`, never a silent empty list) only if the table itself or its expected column headers are missing — a legitimately empty matrix (no evaluations run yet) is not itself an error. |
+
 ## Non-functional requirements (ASRs)
 
 | ID | Category | Requirement | Measurable target | Verification |
@@ -101,6 +108,8 @@ tentacles/logs where a real endpoint exists.
 | NFR-16 | Log volume bound | The server's own log file SHALL NOT grow unbounded over a long-lived process, mirroring NFR-9's job-store bound but for disk instead of memory. | Rotating file handler with a fixed `maxBytes`/`backupCount` (documented, overridable via env vars, sane defaults e.g. 5MB × 3 backups). | Unit test asserting the configured handler is a `RotatingFileHandler` with the expected bounds; code review of the one definition site. |
 | NFR-17 | Timeout policy (restart readiness) | `wait_for_octobot_ready` SHALL NOT block past its own bounded timeout, mirroring NFR-5's outbound-call timeout policy but for a multi-attempt polling loop instead of one HTTP call. | Default `timeout_seconds`/`poll_interval_seconds` documented and overridable per-call; the loop returns `{"ready": false, ...}` at the deadline rather than raising or blocking further. | Unit test with a mocked always-unreachable transport asserting the loop returns within the configured timeout, not indefinitely. |
 | NFR-18 | Scrape reliability (third adapter) | The Tier-B `/advanced/evaluator_config` scrape adapter backing `list_evaluators` (ADR-0009) SHALL fail loudly (a distinct, named exception, `EvaluatorScrapeContractBrokenError`, never conflated with `ProfileScrapeContractBrokenError`/`DataFileScrapeContractBrokenError`) only when the page-wide structural assumption breaks (zero evaluators across all four category containers combined, or a missing container), never when a single category legitimately has zero evaluators. | 100% of a test suite that mutates the fixture HTML's expected container/row structure triggers the distinct exception; a fixture with one category's container present-but-empty (mirroring the live instance's own "Scripted evaluators" case) does NOT trigger it. | Unit tests against a valid fixture, a fixture with one legitimately-empty category, and a deliberately-broken fixture (missing container / zero rows everywhere), mirroring NFR-12/NFR-13's test structure. |
+| NFR-19 | Scrape reliability (fourth adapter) | The Tier-B `/portfolio` scrape adapter backing `get_portfolio_snapshot` (ADR-0011) SHALL fail loudly (a distinct, named exception, `PortfolioScrapeContractBrokenError`) only when the holdings-table/reference-currency structure itself is missing, never when the portfolio legitimately holds zero assets. Per-exchange tooltip precision (`exact`/`per_exchange`) SHALL degrade to `null` rather than raise or guess when the tooltip text doesn't match the one confirmed single-exchange format. | 100% of a test suite that mutates the fixture HTML's expected table/attribute structure triggers the distinct exception; a fixture with zero `tr.symbol-holding` rows does NOT trigger it; a fixture with an unparseable/multi-value tooltip yields `exact: null, per_exchange: null` for that field, not a raised error and not a guessed split. | Unit tests against a valid fixture, a zero-assets fixture, a fixture with an unparseable tooltip, and a deliberately-broken fixture (missing table/reference-currency attribute), mirroring NFR-12/13/18's test structure. |
+| NFR-20 | Scrape reliability (fifth adapter) | The Tier-B `/advanced/matrix` scrape adapter backing `get_evaluation_matrix` (ADR-0011) SHALL fail loudly (a distinct, named exception, `EvaluationMatrixScrapeContractBrokenError`) only when the table itself is missing or its `<thead>` column-name text doesn't match the confirmed `["Evaluator", "Value", "Time frame", "Symbol", "Exchange"]` order exactly, never when the matrix legitimately has zero entries. | 100% of a test suite that mutates the fixture HTML's expected table/header structure triggers the distinct exception; a fixture with zero `<tr>` rows (but an intact, correctly-labeled table) does NOT trigger it. | Unit tests against a valid fixture (including the confirmed live `"None"`-value and empty-`time_frame` real cases), a zero-rows fixture, and a deliberately-broken fixture (missing table / reordered or renamed headers), mirroring NFR-12/13/18's test structure. |
 
 ## Data requirements
 - Profile identity: OctoBot's `profile_id` is the sole stable identifier used
@@ -287,6 +296,25 @@ continuing the same numbering:
     "Alternatives considered" for the resulting open question of whether to
     keep or remove `restart_octobot`/`wait_for_octobot_ready`.
 
+The following are new for the portfolio-snapshot/evaluation-matrix addendum
+(ADR-0011), continuing the same numbering:
+
+15. **Multi-exchange format of `get_portfolio_snapshot`'s per-column `title`
+    tooltip** — confirmed live only for a single-exchange holding
+    (`"Binance: 195.90814133"`). Whether a holding split across ≥2
+    exchanges renders as multiple comma/semicolon/newline-separated pairs,
+    or some other shape, is unconfirmed; a developer with multi-exchange
+    access must verify before the `exact`/`per_exchange` fields can be
+    relied on for that case. Until resolved, ADR-0011's graceful `null`
+    degradation is the shipped behavior, not a placeholder.
+16. **Whether `/advanced/matrix` is ever server-side paginated at scale** —
+    only 8 real rows were observed live (4 evaluators × up to 3
+    timeframes/symbols/exchanges); whether OctoBot truncates or pages this
+    table server-side on a heavily-configured instance was not, and could
+    not safely be, verified this session. A developer should confirm this
+    is a non-issue before treating `get_evaluation_matrix`'s result as a
+    complete snapshot at scale.
+
 ## Traceability
 Source material: OctoBot GitHub (Drakkar-Software/OctoBot, `master` branch,
 `packages/tentacles/Services/Interfaces/web_interface/**`), plus the original
@@ -305,3 +333,15 @@ decision) for the rationale. Downstream: the same
 `docs/specs/octobot-mcp-tool-spec.md` and `docs/tasklist.md`, extended
 additively (new tasklist item, new tool-spec section) rather than modified
 in place.
+
+The portfolio-snapshot/evaluation-matrix addendum (FR-33/FR-34, NFR-19/20,
+open questions 15–16) traces additionally to: a live UI audit of
+`http://192.168.178.100:5001` this session (chrome-devtools
+`list_network_requests`/`get_network_request`/`evaluate_script` against
+`/portfolio` and `/advanced/matrix`, OctoBot 2.1.1 — direct network/script
+evidence, not source reading, since the task was to verify the live
+instance's actual behavior rather than infer it) and ADR-0011 for the
+Tier-B decision and the direct evidence ruling out a Tier-C/socket-based
+design for the evaluation matrix. Downstream: the same
+`docs/specs/octobot-mcp-tool-spec.md` and `docs/tasklist.md`, extended
+additively.
