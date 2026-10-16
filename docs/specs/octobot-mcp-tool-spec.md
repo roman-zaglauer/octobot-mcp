@@ -599,6 +599,283 @@ leave it implicit):**
 
 ---
 
+### Accounts & profile global config (addendum — ADR-0012; genuinely new scope, found via a live UI audit, not in v1's original inventory)
+
+All six tools in this section write through OctoBot's existing, already-used
+`POST /config` route — the same route `update_exchange_credentials`/
+`update_trading_config`/`update_evaluator_config` already call — never a new
+route. The four read tools share one generic Tier-B scrape helper (new:
+`_scrape_config_elements(html, container_selector)` in
+`octobot_mcp.tools._config_scrape`), since every field on these pages
+already self-describes via `config-key`/`config-type`/`config-value`/
+`data-type` attributes — no per-field hardcoding required, unlike every
+prior Tier-B adapter in this project.
+
+| Tool | R/W | Confirm | Maps to | Tier |
+|---|---|---|---|---|
+| `get_exchanges()` | R | no | scrape `GET /accounts` (exchange-card deck) | Tier B — [V-live, this session] |
+| `add_exchange(exchange, api_key, api_secret, api_password?, confirm)` | W | **yes** | `POST /config` (`global_config`) | [V] |
+| `remove_exchange(exchange, confirm)` | W | **yes** | `POST /config` (`removed_elements`) | [V] |
+| `update_exchange_trading_mode(exchange, exchange_type?, enabled?)` | W | no | `POST /config` (`global_config`) | [V]; `exchange_type`'s exact enum values [UNVERIFIED], open question #17 |
+| `get_interfaces()` | R | no | scrape `GET /accounts` (`#panelServices`) | Tier B — [V-live for Telegram/Web; other services' field sets UNVERIFIED, open question #18] |
+| `update_interface_config(service, patch, confirm)` | W | **conditional** (iff `patch` touches a secret-suffix field — NFR-22) | `POST /config` (`global_config`) | [V] mechanism; per-service field completeness as above |
+| `get_notification_routing()` | R | no | scrape `GET /accounts` (`#panelNotifications`) | Tier B — [V-live, this session] |
+| `update_notification_routing(patch)` | W | no | `POST /config` (`global_config`) | [V] |
+| `get_profile_currencies()` | R | no | scrape `GET /profile` (`#panelCurrency`) | Tier B — [V-live, this session] |
+| `update_profile_currencies(patch)` | W | no | `POST /config` (`global_config`) | [V] |
+
+Also in this addendum, the real-trading toggle (higher-stakes, its own
+restart semantics — listed separately below rather than in the table above
+since it is the one tool in this ADR with a materially different risk
+profile):
+
+| Tool | R/W | Confirm | Maps to | Tier |
+|---|---|---|---|---|
+| `set_real_trading_enabled(enabled, confirm)` | W | **yes, both directions** | `POST /config` (`global_config` + `restart_after_save: true`) | [V] |
+
+#### `set_real_trading_enabled(enabled, confirm=False)`
+- Input: `{"enabled": bool, "confirm": bool}`.
+- Behavior: if `confirm != true` → `require_confirmation("set_real_trading_enabled",
+  "enabled" if enabled else "disabled", <reason>)`, no OctoBot call made.
+  Reason text differs by direction (mirroring ADR-0010 Decision 3's
+  `LIVE`/`SIMULATOR`-scaled phrasing for `restart_octobot`): enabling names
+  both the real-money consequence AND the forced restart explicitly;
+  disabling names the forced restart (lower-stakes direction, still gated
+  per ADR-0012 Decision 4's "restart itself is disruptive" reasoning).
+  Before the OctoBot call, checks `JobStore` for an active
+  `backtest`/`data_collection` job (mirroring `restart_octobot`, ADR-0010)
+  and refuses outright, naming the job(s), if one is running.
+- Once confirmed, maps to `POST /config`, JSON body
+  `{"global_config": {"trader_enabled": enabled, "trader-simulator_enabled":
+  !enabled}, "restart_after_save": true}` — both keys always sent together
+  [V: `navbar.js::trigger_trader_state`'s exact logic, confirmed against
+  `trading_state_modal.html`'s template source]. `restart_after_save: true`
+  is never omitted for this tool (unlike `update_exchange_credentials`,
+  which never sets it) — confirmed [V] against the full `/config` route
+  source that this unconditionally triggers
+  `models.schedule_delayed_command(models.restart_bot)`, the same restart
+  primitive `restart_octobot` wraps via a different route.
+- Output on success: `{"real_trading_enabled": enabled, "restart_triggered":
+  true, "message": "OctoBot restart scheduled; call wait_for_octobot_ready()
+  next, then re-confirm via get_profile()/list_profiles() before trading
+  decisions that depend on this flag."}` — the message explicitly reuses
+  `restart_octobot`'s own established follow-up pattern (ADR-0010), since
+  this tool triggers the identical kind of restart.
+- Errors: `CONFIG_UPDATE_FAILED` on a non-2xx response, same pattern as
+  `update_trading_config`.
+- **Does NOT need `convert_profile_to_live` to be called first or after** —
+  confirmed independent: `config.trader.enabled` and `profile.profile_type`
+  are two unrelated OctoBot concepts (per `convert_profile_to_live`'s own
+  existing docstring); this tool is the one this project has been missing
+  since requirements doc open question #5 was first raised.
+
+#### `add_exchange(exchange, api_key, api_secret, api_password=None, confirm=False)`
+- Input: identical shape to `update_exchange_credentials`'s existing input.
+- Behavior: refuses without `confirm=true` (reason: "adds a new exchange and
+  grants this key trading access; verify the exchange name"); refuses
+  locally (no OctoBot call), same as `update_exchange_credentials`, if
+  `exchange` contains an underscore (shared helper, not duplicated logic).
+- Once confirmed, maps to `POST /config`, JSON body
+  `{"global_config": {"exchanges_<exchange>_api-key": api_key,
+  "exchanges_<exchange>_api-secret": api_secret[, "exchanges_<exchange>_
+  api-password": api_password], "exchanges_<exchange>_enabled": true}}` —
+  the one difference from `update_exchange_credentials`'s existing body:
+  the explicit `_enabled: true` key [V: confirmed against
+  `exchange_card.html`'s macro, `enabled` is an independent flat key
+  `update_exchange_credentials`'s current implementation never sets].
+- Output on success: `{"exchange": str, "added": true, "api_key_last4": str}`
+  — never the full key/secret (NFR-6).
+- Errors: `ExchangeCredentialsUpdateRejectedError` (reused from
+  `exchanges.py`, same failure class — this is the same underlying route).
+
+#### `remove_exchange(exchange, confirm=False)`
+- Input: `{"exchange": str, "confirm": bool}`.
+- Behavior: refuses without `confirm=true` (reason: "this permanently
+  deletes the exchange's saved credentials and configuration, not just one
+  field, and cannot be undone").
+- Once confirmed, maps to `POST /config`, JSON body
+  `{"removed_elements": ["exchanges_<exchange>"]}` — confirmed [V] against
+  `config_operations.py`'s full source that a `removed_elements` entry
+  deletes the WHOLE nested node it names (`config["exchanges"]["<exchange>"]`
+  entirely), not one field.
+- Output on success: `{"exchange": str, "removed": true}`.
+- Errors: `CONFIG_UPDATE_FAILED` on a non-2xx response.
+
+#### `update_exchange_trading_mode(exchange, exchange_type=None, enabled=None)`
+- Input: `{"exchange": str, "exchange_type"?: str, "enabled"?: bool}` — at
+  least one of `exchange_type`/`enabled` required.
+- Maps to `POST /config`, `{"global_config": {"exchanges_<exchange>_exchange-type"?:
+  exchange_type, "exchanges_<exchange>_enabled"?: enabled}}` — only the
+  provided field(s) are sent.
+- `exchange_type`'s accepted values are **[UNVERIFIED]** — open question
+  #17; do not validate against a guessed enum client-side until confirmed.
+- Output: `{"exchange": str, "updated_fields": object}`.
+- Not confirm-gated (ADR-0012 Decision 4: judgment call, flagged not
+  silently decided — switching to futures mode changes risk materially on a
+  real-trading exchange, but meets none of this project's literal gating
+  criteria).
+
+#### `get_interfaces()`
+- Input: `{}`.
+- Maps to `GET /accounts` (bare — same route a human visits; confirmed [V]
+  from the full route source that no JSON branch exists). Scrapes every
+  `.config-element` inside `#panelServices`, grouped by the service `name`
+  each card carries.
+- Output: `{"services": [{"service": str, "fields": {<field name, the part
+  after "services_<service>_">: <value, or "***<last4>" if the field name
+  matches NFR-22/23's secret-suffix list>}}]}`.
+- Errors: `ConfigElementScrapeContractBrokenError` (NFR-21) only if
+  `#panelServices` itself is missing — never for zero configured services.
+- Idempotent, read-only, not confirm-gated.
+
+#### `update_interface_config(service, patch, confirm=False)`
+- Input: `{"service": str, "patch": {<field name>: <value>}, "confirm": bool}`.
+- Behavior: if any key in `patch` ends with one of `token`/`secret`/
+  `password`/`api-key`/`api-secret`/`api-password`/`api-hash`/
+  `client-secret` (case-insensitive) and `confirm != true` → refuses via
+  `require_confirmation`, reason naming which field(s) triggered it. A
+  `patch` with no matching key proceeds regardless of `confirm` (ADR-0012
+  Decision 3 — this is the one tool in this project whose gating is
+  per-call, not per-tool; documented here and in the implementation
+  docstring so this isn't missed).
+- Once past gating, maps to `POST /config`, `{"global_config":
+  {"services_<service>_<field>": value, ...}}`.
+- Output: `{"service": str, "updated_fields": {<field>: <value, or
+  "***<last4>" if secret-suffix-matching>}}` — secret-suffix-matching
+  values are redacted in the OUTPUT the same way they are gated on input
+  (NFR-23), never echoed in full even on success.
+- Errors: `CONFIG_UPDATE_FAILED` on a non-2xx response, with the raw error
+  text passed through `redact_secrets` (same INV-4 boundary
+  `update_exchange_credentials` already established) before inclusion.
+
+#### `get_notification_routing()`
+- Input: `{}`. Maps to `GET /accounts` (bare), scrapes `#panelNotifications`.
+- Output: `{"notification_type": [str], "price_alerts": bool, "trades":
+  bool, "trading_script_alerts": bool, "other": bool}` [V-live: confirmed
+  field names `notification_notification-type`/`-price-alerts`/`-trades`/
+  `-trading-script-alerts`/`-other`].
+- Errors: `ConfigElementScrapeContractBrokenError` only if
+  `#panelNotifications` is missing.
+- Idempotent, read-only, not confirm-gated.
+
+#### `update_notification_routing(patch)`
+- Input: `{"patch": {"notification_type"?: [str], "price_alerts"?: bool,
+  "trades"?: bool, "trading_script_alerts"?: bool, "other"?: bool}}`.
+- Maps to `POST /config`, `{"global_config": {"notification_notification-type"?:
+  ..., "notification_price-alerts"?: ..., ...}}` — only provided fields
+  sent.
+- Output: `{"updated_fields": object}`. Not confirm-gated.
+
+#### `get_profile_currencies()`
+- Input: `{}`. Maps to `GET /profile` (bare), scrapes `#panelCurrency`.
+- Output: `{"currencies": [{"currency": str, "enabled": bool, "pairs":
+  [str]}]}` [V-live: confirmed field names `crypto-currencies_<Currency>_enabled`/
+  `-pairs`, e.g. `crypto-currencies_Bitcoin_enabled` = `true`,
+  `crypto-currencies_Bitcoin_pairs` = `["BTC/EUR"]`].
+- Errors: `ConfigElementScrapeContractBrokenError` only if `#panelCurrency`
+  is missing — never for zero traded currencies.
+- Idempotent, read-only, not confirm-gated. Genuinely distinct from
+  `update_profile`'s own `config` field (which is silently ignored by
+  OctoBot's deployed route, per that tool's existing docstring) — this
+  reads/writes through the `/config` route instead, confirmed live.
+
+#### `update_profile_currencies(patch)`
+- Input: `{"patch": {<currency name>: {"enabled"?: bool, "pairs"?: [str]}}}`.
+- Maps to `POST /config`, `{"global_config": {"crypto-currencies_<Currency>_enabled"?:
+  ..., "crypto-currencies_<Currency>_pairs"?: ..., ...}}` per currency in
+  `patch`.
+- Output: `{"updated_fields": object}`. Not confirm-gated (ADR-0012
+  Decision 4: judgment call, flagged — changes what a real-trading profile
+  actually trades, but meets none of this project's literal gating
+  criteria).
+
+---
+
+### Automations (addendum — ADR-0013; genuinely new scope, found via a live UI audit, not in v1's original inventory)
+
+| Tool | R/W | Confirm | Maps to | Tier |
+|---|---|---|---|---|
+| `get_automations()` | R | no | `GET /automations_edit_details` | [V] |
+| `update_automations(patch)` | W | no | `POST /automations?action=save` | [V] |
+| `start_automations(confirm)` | W | **yes** | `POST /automations?action=start` | [V] |
+| `reset_automations_to_default(confirm)` | W | **yes** | `POST /automations?action=factory_reset` | [V] |
+
+All four confirmed [V] against the full `/automations`/`/automations_edit_details`
+route source (`Drakkar-Software/OctoBot`,
+`web_interface/controllers/automation.py`) — "Automations" is OctoBot's own
+internal pseudo-tentacle (`tentacle_type="automation"`), and `save`/read both
+reuse `models.update_tentacle_config`/`get_tentacle_config_and_edit_display`,
+the exact mechanism `update_tentacle_config`/`get_tentacle_config` already
+wrap for every other tentacle (ADR-0013).
+
+#### `get_automations()`
+- Input: `{}`. Maps to `GET /automations_edit_details` [V].
+- Output: OctoBot's own `{"config": {...}, "displayed_elements": {...}}`
+  response, unchanged (NFR-24 — passthrough-only, same discipline as
+  backtest report fields, NFR-8). `config.automations_count` is always
+  present (confirmed [V-live], `0` on a fresh profile); the nested
+  per-automation schema shape for `automations_count > 0` was not observed
+  this session (open question #20) — this tool does not reshape it either
+  way.
+- Errors: generic `OctoBotClientError`/`OctoBotServerError` (plain read, no
+  domain-specific failure mode).
+- Idempotent, read-only, not confirm-gated.
+
+#### `update_automations(patch)`
+- Input: `{"patch": object}` — matching whatever shape `get_automations()`'s
+  own `schema` currently describes; this tool does not validate `patch`
+  against that schema itself (OctoBot's own route does).
+- Maps to `POST /automations?action=save`, `patch` sent as the raw JSON
+  body, unwrapped [V: confirmed `updateTentacleConfig(newValue, update_url)`
+  sends the edited value directly, no wrapper key — same convention
+  `update_tentacle_config` already follows].
+- Output: `{"automations_updated_config": <passthrough of OctoBot's own
+  echoed value>}`.
+- Errors: `CONFIG_UPDATE_FAILED` with OctoBot's error text, same pattern as
+  `update_tentacle_config`.
+- Not confirm-gated (ADR-0013 Decision 2: mutates saved config only, does
+  not itself start anything).
+
+#### `start_automations(confirm=False)`
+- Input: `{"confirm": bool}`.
+- Behavior: if `confirm != true` → `require_confirmation("start_automations",
+  "current profile", "This activates the currently saved automation
+  configuration, which can then take real actions autonomously on bot
+  events going forward, with no further per-action confirmation from this
+  server. Review get_automations()'s current saved config before
+  confirming.")` — a new, explicitly-named gating category (ADR-0013
+  Decision 3: "activates autonomous, ongoing behavior beyond this one
+  call"), distinct from "destructive"/"exposes credentials"/"enables live
+  trading." Before the OctoBot call, checks `JobStore` for an active
+  `backtest`/`data_collection` job and refuses outright if one is running
+  (mirroring `restart_octobot`/`set_real_trading_enabled`, since this action
+  also restarts automations per the confirmed route source).
+- Once confirmed, maps to `POST /automations?action=start`
+  → `models.restart_global_automations()` [V].
+- Output on success: `{"started": true}`.
+- Errors: `AutomationConfigInvalidError` (new, distinct exception — NOT a
+  generic `CONFIG_UPDATE_FAILED`) wrapping OctoBot's own
+  `InvalidAutomationConfigError` message [V: confirmed the route catches
+  exactly this exception and returns it as a 400].
+
+#### `reset_automations_to_default(confirm=False)`
+- Input: `{"confirm": bool}`.
+- Behavior: if `confirm != true` → `require_confirmation(
+  "reset_automations_to_default", "current profile", "This permanently
+  discards the current saved automation configuration back to OctoBot's
+  default and cannot be undone.")` — the ORDINARY irreversible-deletion
+  criterion (ADR-0003), same category as `clear_*_history`/
+  `delete_data_file`, not the new Decision-3 category `start_automations`
+  uses. Same job-store active-job check as `start_automations` (this action
+  also restarts automations, per the confirmed route source).
+- Once confirmed, maps to `POST /automations?action=factory_reset`
+  → `models.reset_automation_config_to_default()` then
+  `models.restart_global_automations()` [V].
+- Output on success: `{"reset": true}`.
+- Errors: `AutomationConfigInvalidError` (same class as `start_automations`,
+  since the same restart call can raise it) or `CONFIG_UPDATE_FAILED` for
+  the reset step's own failure.
+
 ## Job store design
 
 **Updated by the historical-data-collection addendum (ADR-0007) — this is
@@ -903,12 +1180,31 @@ ships with graceful `null` degradation until resolved) and whether
 `/advanced/matrix` is ever server-side paginated at scale (Q16 — not
 verifiable without a heavily-configured live instance).
 
+Accounts/profile-global-config open questions (requirements doc 17–19,
+ADR-0012) — also not blocking: `exchange_type`'s exact enum value strings
+(Q17 — affects only `update_exchange_trading_mode`'s accepted-values
+validation, not the route/body shape itself), the 7 un-configured services'
+exact field sets (Q18 — `get_interfaces`/`update_interface_config` work
+generically regardless; only NFR-22/23's secret-suffix gating/redaction
+depends on it), and the masked-placeholder constant for `get_exchanges`
+(Q19 — resolved, `[V]`, recorded only for implementer convenience).
+
+Automations open questions (requirements doc 20–21, ADR-0013) — also not
+blocking: the populated-automation nested schema shape (Q20 — the
+passthrough design in `get_automations`/`update_automations` tolerates this
+by construction) and whether `InvalidAutomationConfigError`'s message text
+ever needs redaction (Q21 — not yet triggered against a real invalid
+config).
+
 ## Hand-off
 - Traced requirements: FR-1..FR-20, NFR-1..NFR-12 (requirements doc); the
   historical-data-collection addendum additionally traces to FR-22..FR-27,
   NFR-13..NFR-15; the instance-lifecycle addendum (ADR-0010) additionally
   traces to FR-30..FR-31, NFR-17; the portfolio-snapshot/evaluation-matrix
-  addendum (ADR-0011) additionally traces to FR-33..FR-34, NFR-19..NFR-20.
+  addendum (ADR-0011) additionally traces to FR-33..FR-34, NFR-19..NFR-20;
+  the accounts/profile-global-config addendum (ADR-0012) additionally
+  traces to FR-35..FR-42, NFR-21..NFR-23; the Automations addendum
+  (ADR-0013) additionally traces to FR-43..FR-45, NFR-24.
 - Implementer: `developer` agent, sequenced per `docs/tasklist.md`.
 - Test coverage expectations: every ETA branch (unit, synthetic sequences),
   every confirm-gated tool (unit, with/without flag), the watcher's lock
@@ -928,4 +1224,16 @@ verifiable without a heavily-configured live instance).
   (mirroring `list_profiles`'s own), and an explicit zero-rows-but-intact
   fixture per adapter proving that case does NOT raise (mirroring
   `list_evaluators`'s own empty-category test, but applied to a whole-table
-  empty case here rather than one category).
+  empty case here rather than one category). For the accounts/profile-
+  global-config addendum: fixtures built from this session's own [V-live]
+  captures (Telegram/Web/notification/currency field shapes — redacted of
+  any real secret value before being committed to a fixture file), a
+  broken-fixture test per scrape adapter proving each fails loud, and a
+  dedicated test asserting `update_interface_config`'s secret-suffix-based
+  conditional gating (NFR-22) both ways (a non-matching patch proceeding
+  without `confirm`, a matching one refusing). For the Automations
+  addendum: the zero-automations fixture from this ADR's own capture, a
+  populated-automation fixture once available (open question #20,
+  non-blocking), and a test asserting `start_automations`/
+  `reset_automations_to_default` both classify `InvalidAutomationConfigError`
+  distinctly from a generic `CONFIG_UPDATE_FAILED`.

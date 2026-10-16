@@ -36,6 +36,24 @@ tentacles/logs where a real endpoint exists.
   OctoBot's own "already running" guard against an MCP-initiated
   collection, surfaced as a classified `DataCollectionStartFailedError`
   rather than a raw failure.
+- A7 (added for the accounts/profile-global-config addendum, ADR-0012):
+  exchange add/remove, interfaces, notification routing, per-profile
+  exchange mode, and per-profile currency selection are all confirmed to be
+  the SAME underlying OctoBot route (`POST /config`, `global_config`/
+  `removed_elements`) this project's `update_exchange_credentials` already
+  uses — this server assumes that route's existing behavior (confirmed
+  against full source, not just the one branch `update_exchange_credentials`
+  exercises) continues to hold for the additional flat-key families this
+  addendum introduces.
+- A8 (added for the Automations addendum, ADR-0013): "Automations" is
+  OctoBot's own internal pseudo-tentacle
+  (`tentacle_type="automation"`), confirmed from source to share the exact
+  `update_tentacle_config` mechanism every other tentacle already uses, plus
+  two additional actions (`start`/`factory_reset`) this server has no prior
+  precedent for gating; this server assumes OctoBot's own schema
+  (`GET /automations_edit_details`) remains the authoritative description of
+  what a valid `patch` looks like, and never attempts to independently
+  validate or reshape it (NFR-24).
 
 ## Functional requirements
 
@@ -86,6 +104,27 @@ tentacles/logs where a real endpoint exists.
 | FR-33 | The server SHALL provide a tool to read a current per-asset portfolio snapshot (asset, total, value in the profile's reference currency, available, locked-in-orders), closing a gap where no existing tool gives this breakdown directly (ADR-0011). | SHOULD | Given the OctoBot instance holds ≥1 asset, when `get_portfolio_snapshot` is called, the result includes `reference_currency` and, per asset, `total`/`value_in_reference_currency`/`available`/`locked_in_orders`, each carrying at least a `rounded` value via a Tier-B scrape of `GET /portfolio`; the tool raises a distinct, named error (`PortfolioScrapeContractBrokenError`, never a silent empty list) only if the holdings table/reference-currency structure itself is missing — a legitimately empty portfolio (zero assets) is not itself an error. |
 | FR-34 | The server SHALL provide a tool to read OctoBot's live evaluation matrix (every active evaluator's current signal value per timeframe/symbol/exchange), closing a gap where this data was only reconstructable by grepping `export_logs`' `MATRIX` lines (ADR-0011). | SHOULD | When `get_evaluation_matrix` is called, the result includes one entry per `(evaluator, time_frame, symbol, exchange)` row with a `value` (number, `null` for OctoBot's own literal `"None"`, or the passthrough raw string for any other non-numeric text) via a Tier-B scrape of `GET /advanced/matrix`; the tool raises a distinct, named error (`EvaluationMatrixScrapeContractBrokenError`, never a silent empty list) only if the table itself or its expected column headers are missing — a legitimately empty matrix (no evaluations run yet) is not itself an error. |
 
+### Accounts & profile global config (added addendum — genuinely new scope, ADR-0012; found via a live UI audit, not in v1's original curated scope)
+
+| ID | Requirement | Priority | Acceptance criterion |
+|---|---|---|---|
+| FR-35 | The server SHALL provide a tool to toggle OctoBot's real-vs-simulated trading mode, gated by `confirm=true` in both directions (ADR-0012), finally closing the gap left open by requirements doc open question #5. | MUST | Given `confirm` omitted/false, `set_real_trading_enabled(enabled)` refuses and explains both the forced restart and the real-money consequence, scaled by direction. Given `confirm=true`, the tool sends `POST /config` with `{"global_config": {"trader_enabled": enabled, "trader-simulator_enabled": !enabled}, "restart_after_save": true}` and returns `{"real_trading_enabled": enabled, "restart_triggered": true}`; it refuses outright (no OctoBot call) if the `JobStore` shows an active backtest/data-collection job, naming the job(s), mirroring `restart_octobot`'s own check (ADR-0010). |
+| FR-36 | The server SHALL provide a tool to add a new exchange's credentials (as opposed to updating an existing exchange's), gated by `confirm=true`. | MUST | Given `confirm=true` and valid credential fields for an exchange not yet configured (or already configured — the route does not distinguish), `add_exchange` sends `POST /config` with `{"global_config": {"exchanges_<exchange>_api-key": ..., "...-secret": ..., "...-password"?: ..., "exchanges_<exchange>_enabled": true}}` and returns a redacted confirmation (last-4 chars only, never the full key/secret, per NFR-6); refuses locally (no OctoBot call) if `exchange` contains an underscore, mirroring `update_exchange_credentials`'s existing guard. |
+| FR-37 | The server SHALL provide a tool to remove a whole configured exchange (credentials and config entry, not just one field), gated by `confirm=true`. | MUST | Given `confirm=true` and a configured `exchange`, `remove_exchange` sends `POST /config` with `{"removed_elements": ["exchanges_<exchange>"]}` and returns `{"exchange": exchange, "removed": true}`; the refusal-without-confirm reason text explicitly states this also deletes the exchange's saved credentials, not just a config entry. |
+| FR-38 | The server SHALL provide a tool to read every configured exchange's enable state, trading mode (spot/futures/...), and whether credentials are configured (never the credential values themselves) — closing ADR-0006's own "no full exchange list" gap. | SHOULD | Given ≥1 configured exchange, `get_exchanges()` returns, per exchange, `{"name", "enabled", "exchange_type", "credentials_configured"}` via a Tier-B scrape of `/accounts`'s exchange-card deck; `credentials_configured` is derived from whether the `api-key` field's value differs from OctoBot's own masked placeholder, never from reading back the actual key. |
+| FR-39 | The server SHALL provide a tool to update a configured exchange's enabled state and/or trading mode (spot/futures), independent of its credentials. | SHOULD | Given a valid `exchange` and at least one of `exchange_type`/`enabled`, `update_exchange_trading_mode` sends `POST /config` with the corresponding `global_config` keys and returns the updated fields; not confirm-gated (ADR-0012: does not destroy data or expose credentials; switching trading mode is flagged as a judgment call in the ADR, not silently decided). |
+| FR-40 | The server SHALL provide tools to read and write interface/service integration config (Telegram, Web UI, and other configured services), with any credential-shaped field redacted on read and confirm-gated on write. | MUST | `get_interfaces()` returns, per configured service, its field map via a Tier-B scrape of `/accounts`'s `#panelServices`, with any field whose name ends in `token`/`secret`/`password`/`api-key`/`api-secret`/`api-password`/`api-hash`/`client-secret` redacted to last-4-chars (NFR-23). `update_interface_config(service, patch, confirm)` sends the corresponding `global_config` keys; it refuses without `confirm=true` **iff** `patch` contains a key matching that same suffix list (ADR-0012 Decision 3) — a patch touching only non-credential fields (e.g. `services_web_port`) proceeds without `confirm`. |
+| FR-41 | The server SHALL provide tools to read and update which event categories (price alerts, trades, trading-script alerts, other) are notified, and which configured interfaces receive notifications at all. | SHOULD | `get_notification_routing()` returns `{"notification_type": [str], "price_alerts": bool, "trades": bool, "trading_script_alerts": bool, "other": bool}` via a Tier-B scrape of `/accounts`'s `#panelNotifications`; `update_notification_routing(patch)` sends the corresponding `global_config` keys and returns the updated fields; not confirm-gated (mutates routing only, no credentials/destruction/live-trading involved). |
+| FR-42 | The server SHALL provide tools to read and update per-profile traded-currency enable state and pair selection, closing `update_profile`'s own documented "config patch silently ignored" gap. | MUST | `get_profile_currencies()` returns, per currency, `{"currency", "enabled", "pairs": [str]}` via a Tier-B scrape of `/profile`'s `#panelCurrency`; `update_profile_currencies(patch)` (a map of currency name → `{"enabled"?, "pairs"?}`) sends the corresponding `crypto-currencies_<Currency>_<field>` `global_config` keys and returns the updated fields; not confirm-gated. |
+
+### Automations (added addendum — genuinely new scope, ADR-0013; found via a live UI audit, not in v1's original curated scope)
+
+| ID | Requirement | Priority | Acceptance criterion |
+|---|---|---|---|
+| FR-43 | The server SHALL provide a tool to read the current profile's automation configuration and its schema, via OctoBot's existing tentacle-config mechanism (ADR-0013). | SHOULD | Given any profile (including zero configured automations), `get_automations()` returns OctoBot's own `GET /automations_edit_details` response unchanged (`config`/`displayed_elements`, including the JSON schema describing valid patches) — a legitimately-empty (`automations_count: 0`) result is not an error. |
+| FR-44 | The server SHALL provide a tool to update the current profile's automation configuration, passthrough-only (never reshaping OctoBot's own schema). | SHOULD | Given a `patch` matching `get_automations()`'s own schema, `update_automations(patch)` sends `POST /automations?action=save` with `patch` as the raw body and returns OctoBot's own echoed response; not confirm-gated (mutates saved config only, does not itself start anything, same ADR-0003 reasoning as `update_tentacle_config`). |
+| FR-45 | The server SHALL provide tools to start (activate) the current profile's saved automations and to factory-reset them to OctoBot's default, both gated by `confirm=true` under distinct, explicitly-named gating criteria (ADR-0013). | MUST | Given `confirm=true`, `start_automations()` sends `POST /automations?action=start`, returns `{"started": true}`, and raises `AutomationConfigInvalidError` (not a generic failure) if OctoBot reports the saved config is structurally invalid; its refusal-without-confirm text names the "activates autonomous, ongoing behavior" criterion explicitly, not a generic destructive-action warning. Given `confirm=true`, `reset_automations_to_default()` sends `POST /automations?action=factory_reset`, returns `{"reset": true}`, and is gated under the ordinary irreversible-deletion criterion (ADR-0003), mirroring `clear_*_history`. Both refuse outright (no OctoBot call) if the `JobStore` shows an active backtest/data-collection job, mirroring `restart_octobot`/`set_real_trading_enabled`. |
+
 ## Non-functional requirements (ASRs)
 
 | ID | Category | Requirement | Measurable target | Verification |
@@ -110,6 +149,10 @@ tentacles/logs where a real endpoint exists.
 | NFR-18 | Scrape reliability (third adapter) | The Tier-B `/advanced/evaluator_config` scrape adapter backing `list_evaluators` (ADR-0009) SHALL fail loudly (a distinct, named exception, `EvaluatorScrapeContractBrokenError`, never conflated with `ProfileScrapeContractBrokenError`/`DataFileScrapeContractBrokenError`) only when the page-wide structural assumption breaks (zero evaluators across all four category containers combined, or a missing container), never when a single category legitimately has zero evaluators. | 100% of a test suite that mutates the fixture HTML's expected container/row structure triggers the distinct exception; a fixture with one category's container present-but-empty (mirroring the live instance's own "Scripted evaluators" case) does NOT trigger it. | Unit tests against a valid fixture, a fixture with one legitimately-empty category, and a deliberately-broken fixture (missing container / zero rows everywhere), mirroring NFR-12/NFR-13's test structure. |
 | NFR-19 | Scrape reliability (fourth adapter) | The Tier-B `/portfolio` scrape adapter backing `get_portfolio_snapshot` (ADR-0011) SHALL fail loudly (a distinct, named exception, `PortfolioScrapeContractBrokenError`) only when the holdings-table/reference-currency structure itself is missing, never when the portfolio legitimately holds zero assets. Per-exchange tooltip precision (`exact`/`per_exchange`) SHALL degrade to `null` rather than raise or guess when the tooltip text doesn't match the one confirmed single-exchange format. | 100% of a test suite that mutates the fixture HTML's expected table/attribute structure triggers the distinct exception; a fixture with zero `tr.symbol-holding` rows does NOT trigger it; a fixture with an unparseable/multi-value tooltip yields `exact: null, per_exchange: null` for that field, not a raised error and not a guessed split. | Unit tests against a valid fixture, a zero-assets fixture, a fixture with an unparseable tooltip, and a deliberately-broken fixture (missing table/reference-currency attribute), mirroring NFR-12/13/18's test structure. |
 | NFR-20 | Scrape reliability (fifth adapter) | The Tier-B `/advanced/matrix` scrape adapter backing `get_evaluation_matrix` (ADR-0011) SHALL fail loudly (a distinct, named exception, `EvaluationMatrixScrapeContractBrokenError`) only when the table itself is missing or its `<thead>` column-name text doesn't match the confirmed `["Evaluator", "Value", "Time frame", "Symbol", "Exchange"]` order exactly, never when the matrix legitimately has zero entries. | 100% of a test suite that mutates the fixture HTML's expected table/header structure triggers the distinct exception; a fixture with zero `<tr>` rows (but an intact, correctly-labeled table) does NOT trigger it. | Unit tests against a valid fixture (including the confirmed live `"None"`-value and empty-`time_frame` real cases), a zero-rows fixture, and a deliberately-broken fixture (missing table / reordered or renamed headers), mirroring NFR-12/13/18's test structure. |
+| NFR-21 | Scrape reliability (generic adapter, ADR-0012) | The generic `.config-element` Tier-B scrape helper backing `get_exchanges`/`get_interfaces`/`get_notification_routing`/`get_profile_currencies` SHALL fail loudly (a distinct, named exception, `ConfigElementScrapeContractBrokenError`) only when its target container itself is missing from the page, never when the container is intact but holds zero matched elements (e.g. zero configured services, zero traded currencies). | 100% of a test suite that removes the fixture HTML's expected container triggers the distinct exception; a fixture with an intact container and zero `.config-element` children does NOT trigger it, for each of the four read tools. | Unit tests per read tool against a valid fixture, a zero-elements-but-intact-container fixture, and a missing-container fixture, mirroring NFR-12/13/18/19/20's test structure. |
+| NFR-22 | Confirm-flag semantics (conditional, ADR-0012) | `update_interface_config` SHALL require `confirm=true` iff its `patch` contains at least one key matching the documented secret-suffix list (`token`/`secret`/`password`/`api-key`/`api-secret`/`api-password`/`api-hash`/`client-secret`), via the same shared `require_confirmation` helper every other gated tool uses — never bespoke per-call logic beyond the suffix check itself. | 100% of a test suite covering a patch with only non-matching keys (proceeds without `confirm`) and a patch with ≥1 matching key (refuses without `confirm`, proceeds with it) passes for every service exercised. | Unit tests: one non-credential-only patch proceeding without `confirm`; one credential-bearing patch refusing without `confirm` and succeeding with it; one mixed patch (both kinds of key) refusing without `confirm`, per ADR-0012 Decision 3. |
+| NFR-23 | Secret handling (generalized, ADR-0012) | Any interface/service config field whose name matches NFR-22's secret-suffix list SHALL NEVER appear in full in `get_interfaces`'s output, `update_interface_config`'s output, or any log line — generalizing NFR-6's exchange-credential redaction across services. | 0 occurrences of a full raw secret-suffix-matching value in any log line or tool response across the test suite, for every service exercised. | Dedicated test asserting `get_interfaces`/`update_interface_config`'s responses and all log output contain only a redacted form (last-4-chars) for every secret-suffix-matching field, mirroring NFR-6's existing test. |
+| NFR-24 | Config honesty (passthrough, ADR-0013) | `get_automations`/`update_automations` SHALL pass through OctoBot's own automation config/schema structure unchanged, inventing or reshaping no field — the same NFR-8 discipline already applied to backtest report payloads. | 0 invented/renamed fields in either tool's output across the test suite, including the zero-automations fixture. | Code review against a captured real `/automations_edit_details` payload (this ADR's own zero-automations capture, plus a populated fixture per open question 20 once available). |
 
 ## Data requirements
 - Profile identity: OctoBot's `profile_id` is the sole stable identifier used
@@ -315,6 +358,55 @@ The following are new for the portfolio-snapshot/evaluation-matrix addendum
     is a non-issue before treating `get_evaluation_matrix`'s result as a
     complete snapshot at scale.
 
+The following are new for the accounts/profile-global-config addendum
+(ADR-0012) — **not blocking for initial implementation**, mirroring
+ADR-0011's own open questions 15–16 above, since the core mechanism (the
+`/config` route itself) is already `[V]`-confirmed from full source:
+
+17. **Exact literal enum values for `exchanges_<ex>_exchange-type`** —
+    confirmed the field exists (a radio group over
+    `exchanges_details['supported_exchange_types']`'s enum values), but the
+    live instance's actual rendered option value strings (e.g. `"spot"`/
+    `"future"` vs. `"spot"`/`"futures"`) were not captured this session.
+    Developer must confirm the exact strings against the live
+    `/profile#panelExchanges` tab's rendered radio `value` attributes before
+    finalizing `update_exchange_trading_mode`'s `exchange_type` parameter's
+    accepted values.
+18. **Exact field names for the 7 un-configured interface services**
+    (`reddit`, `telegram-api`, `trading-view`, `webhook`, `lunarcrush`,
+    `GPT`, `langchain`, `node-api`) — their existence and the
+    `services_<name>_<field>` naming convention is confirmed, and
+    `get_interfaces`/`update_interface_config` work generically without
+    needing this list hardcoded, but NFR-22/23's secret-suffix-based gating
+    and redaction is only as good as the documented suffix list. A developer
+    should configure (or find test fixtures for) at least one of each
+    remaining service and confirm no credential-bearing field uses a suffix
+    outside the documented list.
+19. **Masked-placeholder constant for `get_exchanges`'s
+    `credentials_configured` detection** — `[V]`, not open: confirmed live
+    as the literal 9-character string `"*********"`, matching
+    `exchange_card.html`'s macro default (`keys_value="*********"`) exactly.
+    Recorded here only so the developer copies the exact confirmed literal
+    rather than re-deriving it.
+
+The following are new for the Automations addendum (ADR-0013) — also not
+blocking for initial implementation, since the mechanism itself (reusing
+`update_tentacle_config`'s own route family) is `[V]`-confirmed from full
+source:
+
+20. **The populated (`automations_count > 0`) nested event/condition/action
+    schema shape** — confirmed this session only for the zero-automations
+    case (the live test instance has none configured). A developer should
+    configure at least one automation on a test instance (or trace
+    `bot_automation.Automation`'s schema-generation code in source) to
+    capture a real fixture before writing `get_automations`'s test suite.
+21. **Whether `InvalidAutomationConfigError`'s message text ever contains
+    anything that should be redacted** — unlikely (automation rules
+    reference bot-internal event/condition/action names, not credentials),
+    but not explicitly checked against a real invalid-config error message
+    this session (none was triggered, since no automation was ever saved or
+    started).
+
 ## Traceability
 Source material: OctoBot GitHub (Drakkar-Software/OctoBot, `master` branch,
 `packages/tentacles/Services/Interfaces/web_interface/**`), plus the original
@@ -345,3 +437,30 @@ Tier-B decision and the direct evidence ruling out a Tier-C/socket-based
 design for the evaluation matrix. Downstream: the same
 `docs/specs/octobot-mcp-tool-spec.md` and `docs/tasklist.md`, extended
 additively.
+
+The accounts/profile-global-config addendum (FR-35..FR-42, NFR-21..NFR-23,
+A7, open questions 17–19) traces additionally to: a live UI audit of
+`http://192.168.178.100:5001` this session (chrome-devtools
+`evaluate_script`/`list_network_requests` against `/`, `/accounts`, and
+`/profile`, OctoBot 2.1.1, read-only — no form submitted) plus full-source
+reads via the GitHub MCP of
+`Drakkar-Software/OctoBot`'s `packages/tentacles/Services/Interfaces/web_interface/controllers/configuration.py`
+(the complete `/config` route) and
+`packages/commons/octobot_commons/configuration/config_operations.py` (the
+complete `parse_and_update`/`clear_dictionaries_by_keys` key-path mechanics),
+plus `templates/components/config/exchange_card.html` and
+`templates/components/modals/trading_state_modal.html`, and ADR-0012 for the
+unified Tier/gating decision. Downstream: the same
+`docs/specs/octobot-mcp-tool-spec.md` and `docs/tasklist.md`, extended
+additively.
+
+The Automations addendum (FR-43..FR-45, NFR-24, A8, open questions 20–21)
+traces additionally to: the same live UI audit (`/automations`, read-only —
+zero automations configured, none created) plus full-source reads via the
+GitHub MCP of `Drakkar-Software/OctoBot`'s
+`packages/tentacles/Services/Interfaces/web_interface/controllers/automation.py`
+(the complete `/automations`/`/automations_edit_details` routes) and
+`static/js/components/automations.js`, and ADR-0013 for the
+tentacle-config-reuse decision and the explicit scope-down evaluation.
+Downstream: the same `docs/specs/octobot-mcp-tool-spec.md` and
+`docs/tasklist.md`, extended additively.

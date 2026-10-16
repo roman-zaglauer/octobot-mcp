@@ -623,3 +623,169 @@ global project standards.
     exists to close), and cross-checks one row's `evaluator` name against
     `list_evaluators`'s own output to confirm the two tools agree on
     evaluator naming.
+
+21. **Accounts & profile global config — ten new tools, closing six gaps
+    found via a live UI audit (ADR-0012).**
+    Not one of the original 14 milestones or any earlier addendum —
+    genuinely new scope, found this session by auditing OctoBot's `/`
+    (navbar), `/accounts`, and `/profile` pages directly. Traces to
+    FR-35..FR-42, NFR-21..NFR-23 (requirements doc) and the "Accounts &
+    profile global config" section of the tool spec, which is the
+    authoritative, implementable contract — implement against that section.
+
+    **Live verification is ALREADY DONE (mirroring milestones 19/20's own
+    "already done" pattern, not the earlier addenda's "step 0, verify
+    first" pattern) — do not re-derive it.** ADR-0012's Context section
+    records, verbatim: the confirmed single underlying mechanism for all six
+    features (`POST /config`'s `global_config`/`removed_elements`
+    dispatch, read in full from `Drakkar-Software/OctoBot`'s
+    `controllers/configuration.py`); the confirmed flat-key shapes for
+    exchange add (`exchanges_<ex>_api-key`/`-secret`/`-password`/`-enabled`)
+    and remove (`removed_elements: ["exchanges_<ex>"]`, confirmed to delete
+    the whole nested node via `config_operations.py`'s full source); the
+    confirmed Telegram/Web interface field names and the notification-routing
+    field names (`notification_notification-type`/`-price-alerts`/`-trades`/
+    `-trading-script-alerts`/`-other`); the confirmed per-profile currency
+    fields (`crypto-currencies_<Currency>_enabled`/`-pairs`); and the
+    real-trading toggle's exact confirmed body
+    (`{"trader_enabled": bool, "trader-simulator_enabled": bool,
+    "restart_after_save": true}`) and its confirmed restart side effect. A
+    developer should still fetch `/accounts`/`/profile` once more to build/
+    validate test fixtures (redacting any real secret value before
+    committing a fixture), but the design's structural assumptions are
+    settled, not open — the only genuinely open items are requirements doc
+    Q17 (`exchange_type`'s exact enum strings), Q18 (the 7 un-configured
+    services' exact field sets), and Q19 (resolved, recorded only for
+    convenience) — none block shipping (see spec's "Open questions" section).
+
+    **Implement, in this order:**
+    1. New module `octobot_mcp.tools._config_scrape`: the generic
+       `.config-element` Tier-B scrape helper
+       (`scrape_config_elements(html, container_selector)`), typed per each
+       element's own `data-type` attribute (`bool`/`number`/`text`/`list`) —
+       the first scrape adapter in this project that doesn't hardcode a
+       per-field list, since every field here already self-describes.
+    2. New error classes in `octobot_mcp.errors`:
+       `ConfigElementScrapeContractBrokenError` (shared by all four new
+       read tools below) and `ExchangeCredentialsUpdateRejectedError` is
+       reused, not duplicated, from `exchanges.py` for `add_exchange`
+       (same underlying route/failure mode) — defined/imported before the
+       modules below that raise them, per this project's established
+       ordering convention.
+    3. `set_real_trading_enabled` — add to `octobot_mcp.tools.profiles` or
+       its own small module (developer's call — it's conceptually closer to
+       profile/trading-state than to exchanges; it shares no code with
+       either existing module beyond the generic `require_confirmation`/
+       `JobStore` helpers already used by `restart_octobot`). Reuses the
+       `JobStore` active-job check pattern verbatim from
+       `instance_lifecycle.py`'s `restart_octobot`.
+    4. `add_exchange`/`remove_exchange`/`update_exchange_trading_mode`/
+       `get_exchanges` — add to `octobot_mcp.tools.exchanges` alongside
+       `update_exchange_credentials` (same domain, same route,
+       `add_exchange` literally shares its underscore-guard helper).
+    5. `get_interfaces`/`update_interface_config` — new module
+       `octobot_mcp.tools.interfaces` (the secret-suffix-based conditional
+       gating, NFR-22/23, is distinctive enough to warrant its own module
+       rather than folding into `exchanges.py`).
+    6. `get_notification_routing`/`update_notification_routing` — add to the
+       same `interfaces.py` module (same page, same container-scrape
+       helper, small enough not to warrant a third module).
+    7. `get_profile_currencies`/`update_profile_currencies` — add to
+       `octobot_mcp.tools.profiles` (profile-domain data, even though it
+       writes through `/config` rather than `/profiles_management/*`).
+    8. Register all ten tools (`register_all`), update `README.md`'s tool
+       count/list and `server.py`'s `INSTRUCTIONS` constant, following this
+       project's established practice of keeping both in sync with every
+       new tool — including a new "Known OctoBot-side quirks" bullet for
+       `set_real_trading_enabled`'s forced restart, mirroring
+       `restart_octobot`'s own existing bullet.
+    9. Tests, mirroring `list_profiles`/`list_evaluators`'s own test
+       structure for the four read tools (valid fixture, zero-elements-but-
+       intact-container fixture, broken fixture); `confirm=false`/`true` for
+       every gated tool including `update_interface_config`'s conditional
+       case (non-credential patch proceeds without `confirm`; credential
+       patch refuses without it); the `JobStore` active-job refusal for
+       `set_real_trading_enabled`; the underscore-in-exchange-name local
+       refusal shared between `update_exchange_credentials`/`add_exchange`.
+
+    **Demo:** agent calls `get_exchanges`/`get_interfaces`/
+    `get_notification_routing`/`get_profile_currencies` and sees the live
+    instance's real configured state in each domain; agent attempts
+    `set_real_trading_enabled(enabled=True)` without `confirm`, gets a
+    refusal naming both the restart and the real-money consequence, and
+    (on a test/non-financially-sensitive instance only — **never demo the
+    confirmed path against this project's own live trading instance**)
+    confirms the gated tools' refusal-vs-proceed behavior against a mocked
+    transport instead; agent calls `update_interface_config` with a
+    non-credential patch (e.g. `services_web_port`) and sees it proceed
+    without `confirm`, then with a credential patch and sees it refuse
+    without `confirm`.
+
+22. **Automations — four new tools, reusing the tentacle-config mechanism
+    (ADR-0013).**
+    Not one of the original 14 milestones or any earlier addendum —
+    genuinely new scope, found via the same live UI audit as milestone 21,
+    auditing OctoBot's `/automations` page. Traces to FR-43..FR-45, NFR-24
+    (requirements doc) and the "Automations" section of the tool spec,
+    which is the authoritative, implementable contract — implement against
+    that section.
+
+    **Live verification is ALREADY DONE** — ADR-0013's Context section
+    records, verbatim, the complete `/automations`/`/automations_edit_details`
+    route source (read in full from `Drakkar-Software/OctoBot`'s
+    `controllers/automation.py`), confirming: `save`/read both reuse
+    `models.update_tentacle_config`/`get_tentacle_config_and_edit_display`
+    (the exact mechanism `update_tentacle_config`/`get_tentacle_config`
+    already wrap); `start`/`factory_reset` both call
+    `models.restart_global_automations()`, which can raise
+    `InvalidAutomationConfigError`; and the zero-automations response shape
+    this session captured live. The explicit scope-down evaluation (read-only
+    now, defer writes) was considered and rejected in the ADR itself — do
+    not re-litigate it; implement all four tools. The only genuinely open
+    item is Q20 (the populated-automation nested schema shape, unobserved
+    since this profile has zero automations configured) — not blocking,
+    since `get_automations`/`update_automations` are passthrough-only by
+    design (NFR-24) and don't need that shape to be correct.
+
+    **Implement, in this order:**
+    1. New error class `AutomationConfigInvalidError` in
+       `octobot_mcp.errors` (before the module below that raises it, per
+       this project's established ordering convention) — wraps OctoBot's
+       own `InvalidAutomationConfigError` message, raised by both
+       `start_automations` and `reset_automations_to_default` (the two
+       actions that call `models.restart_global_automations()`).
+    2. New module `octobot_mcp.tools.automations`: `get_automations`
+       (`GET /automations_edit_details`, passthrough, NFR-24),
+       `update_automations` (`POST /automations?action=save`, raw-body
+       passthrough), `start_automations` (`POST /automations?action=start`,
+       confirm-gated under ADR-0013's new "activates autonomous, ongoing
+       behavior" category, plus the same `JobStore` active-job check
+       `set_real_trading_enabled`/`restart_octobot` already use), and
+       `reset_automations_to_default` (`POST /automations?action=factory_reset`,
+       confirm-gated under the ordinary irreversible-deletion criterion,
+       same `JobStore` check).
+    3. Register the four tools (`register_all`), update `README.md`'s tool
+       count/list and `server.py`'s `INSTRUCTIONS` constant.
+    4. Tests: the zero-automations fixture from ADR-0013's own capture for
+       `get_automations`; `update_automations` passthrough (input patch
+       appears unchanged in the sent body); `confirm=false`/`true` for both
+       `start_automations` and `reset_automations_to_default`, asserting
+       the refusal reason text differs between them (Decision 3 vs. the
+       ordinary destructive-action criterion, not the same boilerplate
+       reused); a mocked `InvalidAutomationConfigError` response from
+       OctoBot asserting it's classified as `AutomationConfigInvalidError`,
+       not a generic `CONFIG_UPDATE_FAILED`, for both tools; the `JobStore`
+       active-job refusal for both.
+
+    **Demo:** agent calls `get_automations` on the live instance and sees
+    the real `automations_count: 0` response; agent calls
+    `update_automations` with a trivial patch (e.g. `{"automations_count":
+    0}`, a genuine no-op given the current state) and sees it echoed back
+    successfully; agent attempts `start_automations`/
+    `reset_automations_to_default` without `confirm`, gets refusals whose
+    reason text visibly differs between the two (one naming "autonomous,
+    ongoing behavior," the other naming "irreversible" — **do not demo the
+    confirmed path against this project's own live instance's real profile
+    unless a developer has explicitly set up a disposable test profile
+    first**, since `factory_reset` is genuinely irreversible and `start`
+    changes live automation-running state).
