@@ -190,6 +190,26 @@ def _redact_logged_args(func: Callable[..., Any], args: tuple[Any, ...], kwargs:
     }
 
 
+def _is_secret_shaped_field(key: Any, value: Any) -> bool:
+    """Whether `key` (a field/parameter name) matches `_SECRET_FIELD_SUFFIXES`
+    (case-insensitive suffix match) AND `value` is itself a string.
+
+    The single shared predicate for "is this a secret field" (confirmed
+    defect fix): both `_redact_dict_param_value` below and
+    `octobot_mcp.tools.interfaces._is_secret_field` now call this, rather
+    than keeping two separately-maintained implementations -- which is
+    exactly how they drifted apart in the first place (`_redact_dict_param_value`
+    used to redact ANY key matching a secret suffix regardless of the
+    value's type, over-redacting e.g. a boolean `require-password` toggle to
+    `REDACTION_MARKER` instead of leaving it `True`/`False`; see
+    `octobot_mcp.tools.interfaces._is_secret_field`'s own docstring for the
+    source-confirmed reason that `isinstance(value, str)` requirement
+    exists). `key` is checked for `isinstance(..., str)` too, since a
+    dict-valued parameter can in principle carry a non-string key.
+    """
+    return isinstance(key, str) and isinstance(value, str) and key.lower().endswith(_SECRET_FIELD_SUFFIXES)
+
+
 def _redact_dict_param_value(value: dict[Any, Any]) -> dict[Any, Any]:
     """Redact a COPY of a dict-valued parameter's secret-suffix-matching keys (confirmed defect fix).
 
@@ -199,13 +219,21 @@ def _redact_dict_param_value(value: dict[Any, Any]) -> dict[Any, Any]:
     passed through completely unredacted, since `patch` isn't a name in that
     denylist. This closes that gap generically: any dict-valued parameter
     (for ANY tool, not special-cased) gets a redacted copy where every key
-    (case-insensitively) ending in one of `_SECRET_FIELD_SUFFIXES` has its
+    whose value is a string AND matches `_is_secret_shaped_field` has that
     value replaced with `REDACTION_MARKER` -- every other key, including
-    non-secret fields like `"port"`, is left exactly as-is, so logs stay
-    useful for debugging. Recurses into nested dict values (e.g.
-    `update_profile_currencies`'s `patch={"Bitcoin": {"enabled": True}}`)
-    so a secret nested two levels deep would be caught too, though no
-    current tool's dict-of-dicts shape actually carries one.
+    non-secret fields like `"port"` and secret-suffix-matching but non-string
+    fields like a boolean `"require-password"`, is left exactly as-is, so
+    logs stay useful for debugging.
+
+    Recurses into nested `dict` values (e.g. `update_profile_currencies`'s
+    `patch={"Bitcoin": {"enabled": True}}`) AND nested `list` values (e.g.
+    a freeform `patch`'s plausible `"webhooks": [{"url": ..., "token": ...}]`
+    shape -- confirmed defect fix: a list was previously left completely
+    untouched, since only `dict` values were ever recursed into) via
+    `_redact_list_param_value`, to arbitrary depth -- a list can contain
+    dicts that contain lists that contain dicts, and so on. A list element
+    that is itself neither a `dict` nor a `list` (a string, number, `None`,
+    etc.) is left exactly as-is.
 
     Never mutates `value` itself -- always returns a new dict.
     """
@@ -213,10 +241,35 @@ def _redact_dict_param_value(value: dict[Any, Any]) -> dict[Any, Any]:
     for key, inner_value in value.items():
         if isinstance(inner_value, dict):
             redacted[key] = _redact_dict_param_value(inner_value)
-        elif isinstance(key, str) and key.lower().endswith(_SECRET_FIELD_SUFFIXES):
+        elif isinstance(inner_value, list):
+            redacted[key] = _redact_list_param_value(inner_value)
+        elif _is_secret_shaped_field(key, inner_value):
             redacted[key] = REDACTION_MARKER
         else:
             redacted[key] = inner_value
+    return redacted
+
+
+def _redact_list_param_value(value: list[Any]) -> list[Any]:
+    """Redact a COPY of a list-valued field, walking into `dict`/`list` elements (confirmed defect fix, Gap 1).
+
+    A list cannot itself carry a "key," so there is nothing here to match
+    against `_SECRET_FIELD_SUFFIXES` directly -- this exists purely so a
+    `dict` element anywhere inside the list (at any nesting depth, via
+    mutual recursion with `_redact_dict_param_value`) gets its own
+    secret-suffix-matching keys redacted. Every other element (a string,
+    number, `None`, bool, etc.) is left exactly as-is.
+
+    Never mutates `value` itself -- always returns a new list.
+    """
+    redacted: list[Any] = []
+    for item in value:
+        if isinstance(item, dict):
+            redacted.append(_redact_dict_param_value(item))
+        elif isinstance(item, list):
+            redacted.append(_redact_list_param_value(item))
+        else:
+            redacted.append(item)
     return redacted
 
 

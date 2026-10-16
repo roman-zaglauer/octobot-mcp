@@ -15,7 +15,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from octobot_mcp.errors import OctoBotClientError
-from octobot_mcp.tools._shared import REDACTION_MARKER, with_error_handling
+from octobot_mcp.tools._shared import REDACTION_MARKER, _redact_dict_param_value, with_error_handling
 
 _LOGGER_NAME = "octobot_mcp.tools._shared"
 
@@ -224,6 +224,56 @@ async def test_a_logging_failure_never_breaks_the_actual_tool_call(monkeypatch, 
     assert result == {"profile_id": "profile-123", "ok": True}
     # The failure itself is swallowed, not propagated -- best-effort, at DEBUG.
     assert any("Failed to log tool call" in r.getMessage() for r in caplog.records)
+
+
+# --- confirmed defect fix: `_redact_dict_param_value` must walk into `list`
+# values too (Gap 1, list-of-dicts bypass), and must not over-redact a
+# secret-suffix-matching key whose value isn't a string (Gap 2) ---------------
+
+
+def test_redact_dict_param_value_redacts_secrets_inside_a_list_of_dicts():
+    """A list-valued field (e.g. `update_automations`/`update_tentacle_config`'s
+    freeform `patch`'s plausible `"webhooks": [{"url": ..., "token": ...}]`
+    shape) used to be left completely untouched -- only `dict`-valued fields
+    were ever recursed into, never `list`-valued ones."""
+    result = _redact_dict_param_value({"webhooks": [{"url": "https://x", "token": "REAL_SECRET_LIST"}]})
+    assert result["webhooks"][0]["token"] == REDACTION_MARKER
+    assert result["webhooks"][0]["url"] == "https://x"
+
+
+def test_redact_dict_param_value_walks_arbitrarily_nested_lists_and_dicts():
+    nested = {"actions": [{"nested": [{"deep": {"api-secret": "DEEPLY_NESTED_SECRET", "name": "ok"}}]}]}
+    result = _redact_dict_param_value(nested)
+    deep = result["actions"][0]["nested"][0]["deep"]
+    assert deep["api-secret"] == REDACTION_MARKER
+    assert deep["name"] == "ok"
+
+
+def test_redact_dict_param_value_leaves_non_dict_list_elements_untouched():
+    result = _redact_dict_param_value({"tags": ["a", 1, None, True]})
+    assert result["tags"] == ["a", 1, None, True]
+
+
+def test_redact_dict_param_value_does_not_redact_non_string_values_even_with_a_secret_suffix_key():
+    """A non-string value (e.g. a boolean `require-password` toggle) must be
+    left exactly as-is, matching `interfaces._is_secret_field`'s own
+    `isinstance(value, str)` requirement -- this used to over-redact it to
+    `REDACTION_MARKER` instead, contradicting this function's own docstring
+    promise that "every other key... is left exactly as-is.\""""
+    result = _redact_dict_param_value({"require-password": True, "port": 8080})
+    assert result == {"require-password": True, "port": 8080}
+
+
+def test_redact_dict_param_value_matches_secret_suffix_case_insensitively():
+    result = _redact_dict_param_value({"TOKEN": "secret"})
+    assert result["TOKEN"] == REDACTION_MARKER
+
+
+def test_redact_dict_param_value_does_not_redact_a_substring_that_is_not_a_suffix():
+    # "tokenized" does NOT end with "token" (it ends with "ized"), so this
+    # must NOT be redacted -- a suffix match, not a substring match.
+    result = _redact_dict_param_value({"tokenized": "not-a-secret-value"})
+    assert result["tokenized"] == "not-a-secret-value"
 
 
 @pytest.fixture

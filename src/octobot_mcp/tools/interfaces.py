@@ -102,7 +102,7 @@ from octobot_mcp.tools._config_scrape import (
     strip_prefix,
 )
 from octobot_mcp.tools._shared import (
-    _SECRET_FIELD_SUFFIXES,
+    _is_secret_shaped_field,
     reject_underscore_in_config_path_segment,
     require_confirmation,
     with_error_handling,
@@ -116,11 +116,15 @@ _NOTIFICATION_PREFIX = "notification_"
 
 #: NFR-22/23's secret-suffix list (ADR-0012 Decision 3), case-insensitive
 #: field-NAME suffix match (after the `services_<service>_` prefix is
-#: already stripped off `config-key`). Imported from `octobot_mcp.tools
-#: ._shared` (confirmed defect fix: moved there as the single source of
-#: truth so `_redact_logged_args`'s generic dict-valued-parameter redaction
-#: uses the identical list, rather than this module keeping its own copy
-#: that could drift from it).
+#: already stripped off `config-key`). Enforced via `_is_secret_field` below,
+#: which delegates to `octobot_mcp.tools._shared._is_secret_shaped_field`
+#: (confirmed defect fix: unified there as the single source of truth, so
+#: `_redact_logged_args`'s generic dict-valued-parameter redaction and this
+#: module's own conditional confirm-gating can never drift apart again --
+#: they previously were two separately-maintained implementations, which is
+#: exactly how `_shared._redact_dict_param_value` ended up over-redacting
+#: non-string secret-suffix-matching values that this module's own
+#: `_is_secret_field` already correctly excluded).
 
 
 def _is_secret_field(field: str, value: Any) -> bool:
@@ -135,12 +139,11 @@ def _is_secret_field(field: str, value: Any) -> bool:
     -- a name-only match is a reasonable heuristic for `data-type="text"`
     fields (the only kind a real credential VALUE can be), but produces a
     false positive for a same-named boolean/number/list field. NFR-22/23's
-    concern is a VALUE being a secret, not a field's name alone.
+    concern is a VALUE being a secret, not a field's name alone. This
+    `isinstance(value, str)` requirement is enforced by the shared
+    `_is_secret_shaped_field` predicate this delegates to, not repeated here.
     """
-    if not isinstance(value, str):
-        return False
-    lowered = field.lower()
-    return any(lowered.endswith(suffix) for suffix in _SECRET_FIELD_SUFFIXES)
+    return _is_secret_shaped_field(field, value)
 
 
 def _redact_secret_value(value: Any) -> Any:

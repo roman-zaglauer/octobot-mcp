@@ -560,27 +560,46 @@ class CompareStrategiesStartFailedError(OctoBotAPIError):
 
 
 class ExchangeCredentialsUpdateRejectedError(OctoBotAPIError):
-    """`update_exchange_credentials` failed (milestone 12, ADR-0003, confirm-gated).
+    """Raised by several tools' config-path writes (milestone 12, ADR-0003 for its
+    confirm-gated original use; task 21/ADR-0012 for its two newer, non-gated
+    call sites below).
 
-    Raised only after the caller has already confirmed (`confirm=true`) --
-    see `octobot_mcp.tools._shared.require_confirmation` for the unconfirmed
-    path, which is a normal return, not an exception. Two distinct causes:
-    - A local refusal, before any OctoBot call is made, because `exchange`
-      contains an underscore -- see
-      `octobot_mcp.tools.exchanges.update_exchange_credentials`'s docstring
-      for the source-confirmed reason this specific case is refused.
-    - OctoBot itself rejected the write: `POST /config`'s `global_config`
-      branch (confirmed against source `models/configuration.py::
-      update_global_config`) returns a real `(success, err_message)` pair
-      the route maps 1:1 to HTTP 200/500 -- this tool trusts that status
-      code, unlike several `profiles.py` routes that needed a post-hoc
-      re-check.
-    Every message this exception carries has already been passed through
-    `octobot_mcp.tools._shared.redact_secrets` (INV-4/NFR-6): the literal
-    `api_key`/`api_secret`/`api_password` values submitted in the same call
-    are scrubbed before being included here, since OctoBot's own responses
-    for this route are confirmed (see that tool's docstring) to sometimes
-    echo submitted config values back verbatim.
+    Two distinct families of cause, across four current call sites:
+    - **`update_exchange_credentials`** (milestone 12, confirm-gated: raised
+      only after the caller has already confirmed via `confirm=true` -- see
+      `octobot_mcp.tools._shared.require_confirmation` for the unconfirmed
+      path, which is a normal return, not an exception):
+      - A local refusal, before any OctoBot call is made, because `exchange`
+        contains an underscore -- see
+        `octobot_mcp.tools.exchanges.update_exchange_credentials`'s docstring
+        for the source-confirmed reason this specific case is refused.
+      - OctoBot itself rejected the write: `POST /config`'s `global_config`
+        branch (confirmed against source `models/configuration.py::
+        update_global_config`) returns a real `(success, err_message)` pair
+        the route maps 1:1 to HTTP 200/500 -- this tool trusts that status
+        code, unlike several `profiles.py` routes that needed a post-hoc
+        re-check.
+      Every message raised for THIS call site has already been passed
+      through `octobot_mcp.tools._shared.redact_secrets` (INV-4/NFR-6): the
+      literal `api_key`/`api_secret`/`api_password` values submitted in the
+      same call are scrubbed before being included here, since OctoBot's own
+      responses for this route are confirmed (see that tool's docstring) to
+      sometimes echo submitted config values back verbatim.
+    - **`update_interface_config`** (task 21, `octobot_mcp.tools.interfaces`,
+      not confirm-gated by this exception -- see that tool's own per-call
+      NFR-22/23 secret-field gating instead) and **`update_profile_currencies`**
+      (task 21, `octobot_mcp.tools.profiles`, not confirm-gated at all): both
+      raise this, local-refusal-only, before any OctoBot call is made, via
+      `octobot_mcp.tools._shared.reject_underscore_in_config_path_segment`,
+      when a caller-supplied value interpolated into a flat
+      `"<prefix>_<value>_<field>"`-shaped config-path segment contains an
+      underscore -- `service` or any key in `patch` for the former, `currency`
+      for the latter. Same root cause as `update_exchange_credentials`'s
+      underscore refusal above (OctoBot's config-path decoder splits any flat
+      key on every literal `"_"` positionally), generalized to every write
+      path with this shape rather than re-implemented per tool -- see
+      `reject_underscore_in_config_path_segment`'s own docstring for the
+      full, source-verified mechanism.
     """
 
 
