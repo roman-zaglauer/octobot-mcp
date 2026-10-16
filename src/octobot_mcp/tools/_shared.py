@@ -94,7 +94,7 @@ from typing import Any, TypeVar
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
 
-from octobot_mcp.errors import OctoBotAPIError
+from octobot_mcp.errors import ExchangeCredentialsUpdateRejectedError, OctoBotAPIError
 from octobot_mcp.jobs import JobStore
 
 _logger = logging.getLogger(__name__)
@@ -110,6 +110,29 @@ F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 #: denylist's only current match (its `api_key`/`api_secret`/`api_password`
 #: parameters), but nothing here hardcodes that tool's name.
 _SENSITIVE_PARAM_NAMES = frozenset({"api_key", "api_secret", "api_password"})
+
+#: The single source of truth for "does this field NAME look like a secret",
+#: case-insensitive SUFFIX match (confirmed defect fix: this list used to be
+#: defined only in `octobot_mcp.tools.interfaces`, where it drove that
+#: module's own read/write redaction and confirm-gating -- but
+#: `_redact_logged_args` below needs the identical list to redact secret-
+#: shaped KEYS found inside a dict-valued parameter (e.g.
+#: `update_interface_config`'s own `patch={"token": "<real secret>"}`, which
+#: is not itself a parameter named `api_key`/`api_secret`/`api_password` and
+#: so previously passed through this module's by-parameter-name-only
+#: redaction completely unredacted). Moved here as the one shared
+#: implementation; `octobot_mcp.tools.interfaces` imports this constant
+#: rather than keeping its own copy, so the two can never drift apart.
+_SECRET_FIELD_SUFFIXES = (
+    "token",
+    "secret",
+    "password",
+    "api-key",
+    "api-secret",
+    "api-password",
+    "api-hash",
+    "client-secret",
+)
 
 #: Parameter names never worth including in the logged `args` payload at
 #: all (as opposed to redacted-in-place): `ctx` is the injected MCP
@@ -155,10 +178,46 @@ def _redact_logged_args(func: Callable[..., Any], args: tuple[Any, ...], kwargs:
     except TypeError:
         return {}
     return {
-        name: (REDACTION_MARKER if name.lower() in _SENSITIVE_PARAM_NAMES else value)
+        name: (
+            REDACTION_MARKER
+            if name.lower() in _SENSITIVE_PARAM_NAMES
+            else _redact_dict_param_value(value)
+            if isinstance(value, dict)
+            else value
+        )
         for name, value in bound.arguments.items()
         if name not in _NON_LOGGED_PARAM_NAMES
     }
+
+
+def _redact_dict_param_value(value: dict[Any, Any]) -> dict[Any, Any]:
+    """Redact a COPY of a dict-valued parameter's secret-suffix-matching keys (confirmed defect fix).
+
+    `_redact_logged_args` only ever redacted a parameter whose own NAME
+    matched `_SENSITIVE_PARAM_NAMES` -- a parameter that is itself a dict
+    (e.g. `update_interface_config`'s `patch={"token": "<real secret>"}`)
+    passed through completely unredacted, since `patch` isn't a name in that
+    denylist. This closes that gap generically: any dict-valued parameter
+    (for ANY tool, not special-cased) gets a redacted copy where every key
+    (case-insensitively) ending in one of `_SECRET_FIELD_SUFFIXES` has its
+    value replaced with `REDACTION_MARKER` -- every other key, including
+    non-secret fields like `"port"`, is left exactly as-is, so logs stay
+    useful for debugging. Recurses into nested dict values (e.g.
+    `update_profile_currencies`'s `patch={"Bitcoin": {"enabled": True}}`)
+    so a secret nested two levels deep would be caught too, though no
+    current tool's dict-of-dicts shape actually carries one.
+
+    Never mutates `value` itself -- always returns a new dict.
+    """
+    redacted: dict[Any, Any] = {}
+    for key, inner_value in value.items():
+        if isinstance(inner_value, dict):
+            redacted[key] = _redact_dict_param_value(inner_value)
+        elif isinstance(key, str) and key.lower().endswith(_SECRET_FIELD_SUFFIXES):
+            redacted[key] = REDACTION_MARKER
+        else:
+            redacted[key] = inner_value
+    return redacted
 
 
 def _log_tool_call(
@@ -362,6 +421,56 @@ def redact_secrets(text: str, secrets: Iterable[str | None]) -> str:
         if secret:
             redacted = redacted.replace(secret, REDACTION_MARKER)
     return redacted
+
+
+def reject_underscore_in_config_path_segment(tool_name: str, label: str, value: str) -> None:
+    """Raise `ExchangeCredentialsUpdateRejectedError` if `value` contains an underscore.
+
+    The ONE shared implementation of the config-path-corruption guard
+    `octobot_mcp.tools.exchanges._reject_exchange_name_with_underscore`
+    originally introduced (milestone 12, for `exchange` names) and now
+    generalized here (confirmed defect fix) so every write path that
+    interpolates a caller-supplied value into a flat
+    `"<prefix>_<value>_<field>"`-shaped config-path segment gets the same
+    guard, without duplicating the check's logic at each call site.
+    `exchanges.py`'s own `_reject_exchange_name_with_underscore` now
+    delegates here; `octobot_mcp.tools.interfaces.update_interface_config`
+    (for `service`, and each field name in `patch`) and
+    `octobot_mcp.tools.profiles.update_profile_currencies` (for `currency`)
+    call this directly.
+
+    Root cause this guards against (confirmed against source,
+    `octobot_commons.configuration.config_operations.parse_and_update`):
+    OctoBot's own config-path decoder splits ANY flat `global_config` key
+    on every literal `"_"`, positionally, to rebuild the nested config path
+    it writes to. A caller-supplied value that itself contains `"_"` (e.g.
+    an exchange name, a service name, a patch field name, a currency name)
+    is therefore split apart incorrectly, silently writing to -- or
+    deleting -- the wrong nested config location instead of the intended
+    one. Refusing locally, before any OctoBot call is made, is strictly
+    better than letting that silent misrouting happen.
+
+    A no-op (returns `None`) when `value` contains no underscore.
+
+    Args:
+        tool_name: the tool refusing the call (e.g. `"update_interface_config"`),
+            echoed in the raised message so the calling agent knows exactly
+            which call was refused.
+        label: a short description of what `value` is (e.g. `"exchange"`,
+            `"service"`, `"patch field"`, `"currency"`), echoed in the
+            message.
+        value: the caller-supplied value to check.
+    """
+    if "_" in value:
+        raise ExchangeCredentialsUpdateRejectedError(
+            f"{tool_name}: {label}={value!r} contains an underscore, which this "
+            "tool refuses to send. OctoBot's own config-path decoder (confirmed "
+            "against source, octobot_commons.configuration.config_operations."
+            "parse_and_update) splits a flat config key on every literal '_' "
+            "positionally, so a value containing '_' here would be silently "
+            "written to (or deleted from) the wrong nested config location "
+            "instead of the intended one."
+        )
 
 
 def _parse_content_disposition_filename(content_disposition: str) -> str | None:

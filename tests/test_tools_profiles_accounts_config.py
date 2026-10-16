@@ -245,6 +245,19 @@ async def test_update_profile_currencies_sends_only_the_provided_sub_fields():
 
 
 @pytest.mark.anyio
+async def test_update_profile_currencies_refuses_locally_for_underscore_in_currency_name():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("OctoBot should never be called for an underscore currency name")
+
+    with pytest.raises(ToolError) as exc_info:
+        await update_profile_currencies(
+            make_ctx(httpx.MockTransport(handler)), patch={"Bitcoin_Cash": {"enabled": True}}
+        )
+    assert "ExchangeCredentialsUpdateRejectedError" in str(exc_info.value)
+    assert "underscore" in str(exc_info.value)
+
+
+@pytest.mark.anyio
 async def test_update_profile_currencies_classifies_octobot_rejection():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json="some error")

@@ -160,6 +160,7 @@ from octobot_mcp.tools._config_scrape import (
 )
 from octobot_mcp.tools._shared import (
     _parse_content_disposition_filename,
+    reject_underscore_in_config_path_segment,
     require_confirmation,
     with_error_handling,
 )
@@ -1435,7 +1436,19 @@ async def update_profile_currencies(ctx: Context, patch: dict[str, dict[str, Any
     Decision 4: a judgment call, flagged explicitly -- changes what a
     real-trading profile actually trades, but meets none of this project's
     literal gating criteria).
+
+    Refuses locally (no OctoBot call), raising
+    `ExchangeCredentialsUpdateRejectedError`, if any `currency` key in
+    `patch` contains an underscore (confirmed defect fix): `currency` is
+    interpolated into a flat `"crypto-currencies_<currency>_..."` config
+    key the same way `exchanges.py`'s exchange-name guard already protects
+    against -- see `octobot_mcp.tools._shared.
+    reject_underscore_in_config_path_segment`'s docstring for the
+    underlying config-path-corruption mechanism.
     """
+    for currency in patch:
+        reject_underscore_in_config_path_segment("update_profile_currencies", "currency", currency)
+
     global_config: dict[str, Any] = {}
     for currency, fields in patch.items():
         if "enabled" in fields:

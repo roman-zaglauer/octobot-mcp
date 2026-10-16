@@ -10,6 +10,7 @@ uses (see that fixture file's own contents) -- its `#panelServices`/
 
 import inspect
 import json
+import logging
 from pathlib import Path
 
 import httpx2 as httpx
@@ -166,6 +167,32 @@ async def test_update_interface_config_proceeds_with_confirm_for_credential_patc
 
 
 @pytest.mark.anyio
+async def test_update_interface_config_refuses_locally_for_underscore_in_service_name():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("OctoBot should never be called for an underscore service name")
+
+    with pytest.raises(ToolError) as exc_info:
+        await update_interface_config(
+            make_ctx(httpx.MockTransport(handler)), service="web_socket", patch={"port": 8080}
+        )
+    assert "ExchangeCredentialsUpdateRejectedError" in str(exc_info.value)
+    assert "underscore" in str(exc_info.value)
+
+
+@pytest.mark.anyio
+async def test_update_interface_config_refuses_locally_for_underscore_in_patch_field_name():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("OctoBot should never be called for an underscore patch field name")
+
+    with pytest.raises(ToolError) as exc_info:
+        await update_interface_config(
+            make_ctx(httpx.MockTransport(handler)), service="web", patch={"some_field": 1}
+        )
+    assert "ExchangeCredentialsUpdateRejectedError" in str(exc_info.value)
+    assert "underscore" in str(exc_info.value)
+
+
+@pytest.mark.anyio
 async def test_update_interface_config_classifies_octobot_rejection():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json="some error")
@@ -236,3 +263,32 @@ def test_update_notification_routing_has_no_confirm_parameter():
 def test_get_interfaces_and_notifications_have_no_confirm_parameter():
     assert "confirm" not in inspect.signature(get_interfaces).parameters
     assert "confirm" not in inspect.signature(get_notification_routing).parameters
+
+
+# --- confirmed defect fix: a real secret inside `patch` must never reach the
+# generic per-call tool logger (`_log_tool_call`/`_redact_logged_args` only
+# used to redact by PARAMETER NAME, so `patch`'s own dict VALUES -- including
+# a real secret keyed by a secret-suffix-matching field name -- passed
+# through completely unredacted) -----------------------------------------
+
+
+@pytest.mark.anyio
+async def test_update_interface_config_never_logs_a_real_secret_inside_patch(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"global_updated_config": {}})
+
+    with caplog.at_level(logging.INFO, logger="octobot_mcp.tools._shared"):
+        await update_interface_config(
+            make_ctx(httpx.MockTransport(handler)),
+            service="telegram",
+            patch={"token": "realvalue123", "port": 8080},
+            confirm=True,
+        )
+
+    full_text = caplog.text
+    # The real secret value must never appear anywhere in the log output.
+    assert "realvalue123" not in full_text
+    # Selective redaction, not nuking the whole `patch`: a non-secret field
+    # in the same dict still appears in the clear, for debugging.
+    assert "'port': 8080" in full_text
+    assert "[REDACTED]" in full_text

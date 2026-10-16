@@ -133,6 +133,32 @@ async def test_secret_shaped_params_are_redacted_by_name_in_the_log_line(caplog)
 
 
 @pytest.mark.anyio
+async def test_secret_shaped_keys_inside_a_dict_valued_param_are_redacted(caplog):
+    """Confirmed defect fix: a parameter that is itself a dict (e.g.
+    `update_interface_config`'s own `patch={"token": "<real secret>"}`) is
+    not itself named `api_key`/`api_secret`/`api_password`, so the by-
+    parameter-NAME redaction above never touched it -- the real secret
+    passed straight through into the log line. This proves the fix: any key
+    INSIDE a dict-valued parameter that matches a secret-suffix (case-
+    insensitive) is redacted, while a non-secret key in that same dict
+    (`"port"`) is left untouched."""
+
+    @with_error_handling
+    async def _fake_tool_with_a_dict_valued_param(ctx, patch: dict) -> dict:
+        return {"ok": True}
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _fake_tool_with_a_dict_valued_param(
+            ctx=object(), patch={"token": "THE_REAL_DICT_SECRET", "port": 8080}
+        )
+
+    full_text = caplog.text
+    assert "THE_REAL_DICT_SECRET" not in full_text
+    assert REDACTION_MARKER in full_text
+    assert "'port': 8080" in full_text
+
+
+@pytest.mark.anyio
 async def test_secret_redaction_is_generic_by_parameter_name_not_hardcoded_to_one_tool(caplog):
     """A DIFFERENT tool (not `update_exchange_credentials`) with a
     same-named `api_key` parameter is redacted the same way -- proving the

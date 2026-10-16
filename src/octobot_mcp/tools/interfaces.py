@@ -101,7 +101,12 @@ from octobot_mcp.tools._config_scrape import (
     scrape_config_elements,
     strip_prefix,
 )
-from octobot_mcp.tools._shared import require_confirmation, with_error_handling
+from octobot_mcp.tools._shared import (
+    _SECRET_FIELD_SUFFIXES,
+    reject_underscore_in_config_path_segment,
+    require_confirmation,
+    with_error_handling,
+)
 
 _CONFIG_PATH = "/config"
 _ACCOUNTS_PATH = "/accounts"
@@ -111,17 +116,11 @@ _NOTIFICATION_PREFIX = "notification_"
 
 #: NFR-22/23's secret-suffix list (ADR-0012 Decision 3), case-insensitive
 #: field-NAME suffix match (after the `services_<service>_` prefix is
-#: already stripped off `config-key`).
-_SECRET_FIELD_SUFFIXES = (
-    "token",
-    "secret",
-    "password",
-    "api-key",
-    "api-secret",
-    "api-password",
-    "api-hash",
-    "client-secret",
-)
+#: already stripped off `config-key`). Imported from `octobot_mcp.tools
+#: ._shared` (confirmed defect fix: moved there as the single source of
+#: truth so `_redact_logged_args`'s generic dict-valued-parameter redaction
+#: uses the identical list, rather than this module keeping its own copy
+#: that could drift from it).
 
 
 def _is_secret_field(field: str, value: Any) -> bool:
@@ -270,7 +269,20 @@ async def update_interface_config(
     redacted if secret-suffix-matching>}}` -- secret-suffix-matching values
     are redacted in the OUTPUT the same way they are gated on input (NFR-23),
     never echoed in full even on success.
+
+    Before any gating or OctoBot call, refuses locally (raising
+    `ExchangeCredentialsUpdateRejectedError`) if `service` or any key in
+    `patch` contains an underscore (confirmed defect fix): both are
+    interpolated into the flat `"services_<service>_<field>"` config key
+    above, the same config-path-corruption mechanism
+    `exchanges.py`'s exchange-name guard already protects against -- see
+    `octobot_mcp.tools._shared.reject_underscore_in_config_path_segment`'s
+    docstring.
     """
+    reject_underscore_in_config_path_segment("update_interface_config", "service", service)
+    for field in patch:
+        reject_underscore_in_config_path_segment("update_interface_config", "patch field", field)
+
     secret_fields = [field for field, value in patch.items() if _is_secret_field(field, value)]
     if secret_fields and confirm is not True:
         return require_confirmation(

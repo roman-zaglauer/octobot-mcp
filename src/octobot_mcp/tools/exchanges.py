@@ -168,7 +168,12 @@ from octobot_mcp.tools._config_scrape import (
     scrape_config_elements,
     strip_prefix,
 )
-from octobot_mcp.tools._shared import redact_secrets, require_confirmation, with_error_handling
+from octobot_mcp.tools._shared import (
+    redact_secrets,
+    reject_underscore_in_config_path_segment,
+    require_confirmation,
+    with_error_handling,
+)
 
 _GLOBAL_CONFIG_PATH = "/config"
 _ACCOUNTS_PATH = "/accounts"
@@ -431,25 +436,18 @@ async def update_exchange_credentials(
 def _reject_exchange_name_with_underscore(tool_name: str, exchange: str) -> None:
     """Raise `ExchangeCredentialsUpdateRejectedError` if `exchange` contains an underscore.
 
-    The ONE shared implementation of the guard `update_exchange_credentials`
-    originally introduced inline (milestone 12) -- see this module's
-    docstring for why it is now also applied to `add_exchange`/
-    `remove_exchange`/`update_exchange_trading_mode`, not just the tool it
-    was first written for. A no-op (returns `None`) when `exchange` contains
-    no underscore.
+    `update_exchange_credentials` originally introduced this guard inline
+    (milestone 12); it's now also applied to `add_exchange`/
+    `remove_exchange`/`update_exchange_trading_mode`. The actual check (and
+    the error class) now lives in the shared
+    `octobot_mcp.tools._shared.reject_underscore_in_config_path_segment`
+    (confirmed defect fix: generalized so `octobot_mcp.tools.interfaces`/
+    `octobot_mcp.tools.profiles` reuse the identical logic for their own
+    config-path-corruption-prone parameters, instead of a third copy of
+    this same check) -- this wrapper only supplies this module's own
+    `"exchange"` label. A no-op when `exchange` contains no underscore.
     """
-    if "_" in exchange:
-        raise ExchangeCredentialsUpdateRejectedError(
-            f"{tool_name}: exchange={exchange!r} contains an underscore, "
-            "which this tool refuses to send. OctoBot's own config-path "
-            "decoder (confirmed against source, octobot_commons.configuration."
-            "config_operations.parse_and_update) splits a flat "
-            "'exchanges_<exchange>_<field>' key (or a 'exchanges_<exchange>' "
-            "removed_elements entry) on every literal '_' positionally, so "
-            "an exchange name containing '_' would be silently written to "
-            "(or deleted from) the wrong nested config location instead of "
-            "this exchange's own."
-        )
+    reject_underscore_in_config_path_segment(tool_name, "exchange", exchange)
 
 
 async def _fetch_accounts_html(client: httpx.AsyncClient) -> str:
