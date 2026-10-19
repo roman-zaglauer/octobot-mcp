@@ -226,14 +226,27 @@ def _redact_dict_param_value(value: dict[Any, Any]) -> dict[Any, Any]:
     logs stay useful for debugging.
 
     Recurses into nested `dict` values (e.g. `update_profile_currencies`'s
-    `patch={"Bitcoin": {"enabled": True}}`) AND nested `list` values (e.g.
-    a freeform `patch`'s plausible `"webhooks": [{"url": ..., "token": ...}]`
-    shape -- confirmed defect fix: a list was previously left completely
-    untouched, since only `dict` values were ever recursed into) via
-    `_redact_list_param_value`, to arbitrary depth -- a list can contain
-    dicts that contain lists that contain dicts, and so on. A list element
-    that is itself neither a `dict` nor a `list` (a string, number, `None`,
-    etc.) is left exactly as-is.
+    `patch={"Bitcoin": {"enabled": True}}`) AND nested `list`/`tuple` values
+    (e.g. a freeform `patch`'s plausible `"webhooks": [{"url": ...,
+    "token": ...}]` shape -- confirmed defect fix: a list was previously
+    left completely untouched, since only `dict` values were ever recursed
+    into) via `_redact_sequence_param_value`, to arbitrary depth -- a
+    list/tuple can contain dicts that contain lists that contain dicts, and
+    so on. A sequence element that is itself neither a `dict` nor a
+    `list`/`tuple` (a string, number, `None`, etc.) is left exactly as-is.
+
+    **Third-round confirmed defect fix**: the original list-only version of
+    this recursion (committed as the Gap-1 fix) still left a `tuple` value
+    completely unredacted -- reproduced live: `_redact_dict_param_value(
+    {"items": ({"token": "SECRET"},)})` returned the secret unredacted,
+    since `isinstance(({"token": "SECRET"},), list)` is `False`. Not
+    currently reachable through the MCP server's real external input path
+    (JSON-RPC -> pydantic can only ever produce `dict`/`list`/`str`/`int`/
+    `float`/`bool`/`None`, never `tuple`, for an `Any`-typed field) --
+    but given this exact "not reachable today" reasoning already failed to
+    hold twice before for this same mechanism, the check is widened to
+    `(list, tuple)` now rather than left as a theoretical gap to rediscover
+    a fourth time.
 
     Never mutates `value` itself -- always returns a new dict.
     """
@@ -241,8 +254,8 @@ def _redact_dict_param_value(value: dict[Any, Any]) -> dict[Any, Any]:
     for key, inner_value in value.items():
         if isinstance(inner_value, dict):
             redacted[key] = _redact_dict_param_value(inner_value)
-        elif isinstance(inner_value, list):
-            redacted[key] = _redact_list_param_value(inner_value)
+        elif isinstance(inner_value, (list, tuple)):
+            redacted[key] = _redact_sequence_param_value(inner_value)
         elif _is_secret_shaped_field(key, inner_value):
             redacted[key] = REDACTION_MARKER
         else:
@@ -250,27 +263,30 @@ def _redact_dict_param_value(value: dict[Any, Any]) -> dict[Any, Any]:
     return redacted
 
 
-def _redact_list_param_value(value: list[Any]) -> list[Any]:
-    """Redact a COPY of a list-valued field, walking into `dict`/`list` elements (confirmed defect fix, Gap 1).
+def _redact_sequence_param_value(value: list[Any] | tuple[Any, ...]) -> list[Any] | tuple[Any, ...]:
+    """Redact a COPY of a list/tuple-valued field, walking into `dict`/sequence elements (confirmed defect fix, Gap 1 + its own round-3 tuple follow-up).
 
-    A list cannot itself carry a "key," so there is nothing here to match
-    against `_SECRET_FIELD_SUFFIXES` directly -- this exists purely so a
-    `dict` element anywhere inside the list (at any nesting depth, via
+    A sequence cannot itself carry a "key," so there is nothing here to
+    match against `_SECRET_FIELD_SUFFIXES` directly -- this exists purely so
+    a `dict` element anywhere inside the sequence (at any nesting depth, via
     mutual recursion with `_redact_dict_param_value`) gets its own
     secret-suffix-matching keys redacted. Every other element (a string,
-    number, `None`, bool, etc.) is left exactly as-is.
+    number, `None`, bool, etc.) is left exactly as-is. The redacted copy
+    preserves the original container TYPE (`list` stays a `list`, `tuple`
+    stays a `tuple`) rather than normalizing both to one type, so a logged
+    `tuple`-valued field still reads as a tuple.
 
-    Never mutates `value` itself -- always returns a new list.
+    Never mutates `value` itself -- always returns a new list/tuple.
     """
     redacted: list[Any] = []
     for item in value:
         if isinstance(item, dict):
             redacted.append(_redact_dict_param_value(item))
-        elif isinstance(item, list):
-            redacted.append(_redact_list_param_value(item))
+        elif isinstance(item, (list, tuple)):
+            redacted.append(_redact_sequence_param_value(item))
         else:
             redacted.append(item)
-    return redacted
+    return type(value)(redacted)
 
 
 def _log_tool_call(

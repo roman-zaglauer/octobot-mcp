@@ -12,6 +12,7 @@ against a mocked transport in this suite.
 """
 
 import json
+import logging
 
 import httpx2 as httpx
 import pytest
@@ -108,6 +109,31 @@ async def test_update_automations_sends_patch_as_raw_body_and_wraps_echo():
 
     result = await update_automations(make_ctx(httpx.MockTransport(handler)), patch={"automations_count": 1})
     assert result == {"automations_updated_config": echoed}
+
+
+@pytest.mark.anyio
+async def test_update_automations_never_logs_a_real_secret_inside_patch(caplog):
+    # update_automations' patch is a freeform, unvalidated nested structure
+    # (ADR-0013: the real per-automation schema was never observed live,
+    # since this profile has zero automations configured) -- exactly the
+    # shape octobot_mcp.tools._shared._redact_dict_param_value's own
+    # docstring cites as motivating its list/dict recursion. A holistic
+    # review confirmed the mechanism IS generic (every dict-valued `patch`
+    # flows through the same decorator), but this tool had no regression
+    # test of its own locking that in -- only update_interface_config did.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"automations_count": 1})
+
+    with caplog.at_level(logging.INFO, logger="octobot_mcp.tools._shared"):
+        await update_automations(
+            make_ctx(httpx.MockTransport(handler)),
+            patch={"automations_count": 1, "actions": [{"webhook_token": "realvalue789"}]},
+        )
+
+    full_text = caplog.text
+    assert "realvalue789" not in full_text
+    assert "'automations_count': 1" in full_text
+    assert "[REDACTED]" in full_text
 
 
 @pytest.mark.anyio

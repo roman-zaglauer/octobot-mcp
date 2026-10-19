@@ -13,6 +13,7 @@ project's other test modules.
 
 import base64
 import json
+import logging
 
 import httpx2 as httpx
 import pytest
@@ -112,6 +113,31 @@ async def test_update_tentacle_config_sends_name_as_query_param_and_patch_as_raw
         "updated_fields": {"disable_buy_orders": True},
         "message": "DailyTradingMode updated",
     }
+
+
+@pytest.mark.anyio
+async def test_update_tentacle_config_never_logs_a_real_secret_inside_patch(caplog):
+    # update_tentacle_config's patch is a freeform dict/OctoBot does not
+    # constrain its keys -- the exact shape
+    # octobot_mcp.tools._shared._redact_dict_param_value's own docstring
+    # cites as motivating this mechanism's list/dict recursion. This closes
+    # the gap a holistic review found: the mechanism was confirmed generic
+    # (covers every dict-valued `patch` parameter via the same decorator),
+    # but this tool had no regression test of its own locking that in.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json="DailyTradingMode updated")
+
+    with caplog.at_level(logging.INFO, logger="octobot_mcp.tools._shared"):
+        await update_tentacle_config(
+            make_ctx(httpx.MockTransport(handler)),
+            tentacle="DailyTradingMode",
+            patch={"webhook_secret": "realvalue456", "enabled": True},
+        )
+
+    full_text = caplog.text
+    assert "realvalue456" not in full_text
+    assert "'enabled': True" in full_text
+    assert "[REDACTED]" in full_text
 
 
 @pytest.mark.anyio

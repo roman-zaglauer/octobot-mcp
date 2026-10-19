@@ -291,7 +291,7 @@ not a scrape gap, a genuine absence on this page.
 Any tool that destroys data, writes exchange credentials, enables live/ \
 real-money trading, or disrupts the whole running instance (`restart_octobot`) \
 requires an explicit `confirm=true` argument. `start_automations` adds a \
-FOURTH gating category (ADR-0013): it activates autonomous, ongoing bot \
+further gating category (ADR-0013): it activates autonomous, ongoing bot \
 behavior with no further per-action confirmation, which is neither \
 destructive, credential-exposing, nor a live-trading toggle, but still \
 requires `confirm=true` for the same reason -- read its refusal's reason \

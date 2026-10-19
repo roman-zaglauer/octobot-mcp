@@ -276,6 +276,22 @@ def test_redact_dict_param_value_does_not_redact_a_substring_that_is_not_a_suffi
     assert result["tokenized"] == "not-a-secret-value"
 
 
+def test_redact_dict_param_value_redacts_secrets_inside_a_tuple_of_dicts():
+    """Round-3 confirmed defect fix: the list-recursion fix above only ever
+    checked `isinstance(value, list)`, so a `tuple` of dicts (e.g.
+    `{"items": ({"token": "..."},)}`) still leaked a real secret verbatim --
+    not reachable through the live MCP server's real JSON-RPC input path
+    today (JSON has no tuple literal), but a real bypass at the function
+    level, confirmed by execution, not just reasoning. Also asserts the
+    redacted container's own type is preserved (stays a tuple, not
+    silently normalized to a list)."""
+    result = _redact_dict_param_value({"items": ({"url": "https://x", "token": "REAL_SECRET_TUPLE"}, "plain")})
+    assert isinstance(result["items"], tuple)
+    assert result["items"][0]["token"] == REDACTION_MARKER
+    assert result["items"][0]["url"] == "https://x"
+    assert result["items"][1] == "plain"
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"

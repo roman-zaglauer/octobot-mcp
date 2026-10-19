@@ -256,6 +256,33 @@ async def test_update_notification_routing_sends_only_the_provided_fields():
     assert result == {"updated_fields": {"trading_script_alerts": False, "notification_type": ["web"]}}
 
 
+@pytest.mark.anyio
+async def test_update_notification_routing_never_sends_a_stray_underscore_past_the_prefix():
+    # update_notification_routing is the one flat-key-building write in this
+    # module that does NOT call reject_underscore_in_config_path_segment --
+    # a holistic cross-series review flagged this as a non-obvious
+    # asymmetry worth locking in with its own test, since it's safe only
+    # because field.replace('_', '-') converts every underscore before
+    # interpolation. Prove that directly: a field name with MULTIPLE
+    # underscores must still produce a key with exactly one underscore
+    # total (the one in the "notification_" prefix itself) -- if the
+    # hyphen-swap were ever removed or changed, this is exactly the
+    # assertion that would catch it.
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"global_updated_config": {}})
+
+    await update_notification_routing(
+        make_ctx(httpx.MockTransport(handler)),
+        patch={"a_field_with_many_underscores": True},
+    )
+    (sent_key,) = seen["body"]["global_config"].keys()
+    assert sent_key == "notification_a-field-with-many-underscores"
+    assert sent_key.count("_") == 1  # only the "notification_" prefix's own underscore
+
+
 def test_update_notification_routing_has_no_confirm_parameter():
     assert "confirm" not in inspect.signature(update_notification_routing).parameters
 

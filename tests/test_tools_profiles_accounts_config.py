@@ -12,6 +12,7 @@ broken-fixture tests mutate known substrings" convention.
 
 import inspect
 import json
+import logging
 from pathlib import Path
 
 import httpx2 as httpx
@@ -242,6 +243,29 @@ async def test_update_profile_currencies_sends_only_the_provided_sub_fields():
         }
     }
     assert result == {"updated_fields": patch}
+
+
+@pytest.mark.anyio
+async def test_update_profile_currencies_never_logs_a_real_secret_inside_patch(caplog):
+    # update_profile_currencies' patch is not documented to carry secrets
+    # (only "enabled"/"pairs" per currency) but its `patch` parameter still
+    # flows through the same generic _redact_dict_param_value mechanism as
+    # every other dict-valued patch in this codebase -- this locks that in
+    # explicitly, since a holistic review found only update_interface_config
+    # had an equivalent test for this project-wide mechanism.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"global_updated_config": {}})
+
+    with caplog.at_level(logging.INFO, logger="octobot_mcp.tools._shared"):
+        await update_profile_currencies(
+            make_ctx(httpx.MockTransport(handler)),
+            patch={"Bitcoin": {"enabled": True, "api_secret": "realvalue321"}},
+        )
+
+    full_text = caplog.text
+    assert "realvalue321" not in full_text
+    assert "'enabled': True" in full_text
+    assert "[REDACTED]" in full_text
 
 
 @pytest.mark.anyio

@@ -381,6 +381,19 @@ async def update_notification_routing(ctx: Context, patch: dict[str, Any]) -> An
     docstring already documents for this exact route). Not confirm-gated
     (ADR-0012 Decision 4: mutates routing only, no credentials/destruction/
     live-trading involved).
+
+    **Why this is the one flat-key-building write in this module (and in
+    this whole addendum) that does NOT call
+    `octobot_mcp.tools._shared.reject_underscore_in_config_path_segment`**
+    (a holistic cross-series review flagged this as a non-obvious asymmetry
+    worth documenting explicitly, not an oversight): `field.replace('_',
+    '-')` above converts every underscore in a caller-supplied `field` name
+    to a hyphen BEFORE it's interpolated, so the resulting flat key can
+    never contain more than the one intentional `notification_` separator
+    -- the exact config-path-corruption risk the shared guard exists for is
+    neutralized by construction here, not by an explicit check. If this
+    mapping is ever removed or changed, re-evaluate whether this tool then
+    needs the explicit guard too.
     """
     global_config = {f"notification_{field.replace('_', '-')}": value for field, value in patch.items()}
     client = get_client(ctx)
