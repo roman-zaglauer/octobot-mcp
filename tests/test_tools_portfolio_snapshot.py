@@ -89,6 +89,27 @@ async def test_get_portfolio_snapshot_does_not_raise_on_zero_assets():
 
 
 @pytest.mark.anyio
+async def test_get_portfolio_snapshot_exact_can_differ_from_rounded():
+    # The real fixture's displayed cell text happens to equal its tooltip's
+    # full-precision value for every field, so the test above never actually
+    # exercises the case ADR-0011 Decision 4 exists for: a genuinely rounded
+    # display vs. a higher-precision tooltip (e.g. "0.00011" shown, but
+    # "0.00010725" the real amount). Mutate only the displayed BTC total's
+    # inner text, leaving its tooltip untouched, to prove `rounded` and
+    # `exact` are extracted independently and can legitimately differ.
+    rounded_display_html = PORTFOLIO_HTML.replace(
+        'title="Binance: 0.00010725">\n                        0.00010725\n                    </td>',
+        'title="Binance: 0.00010725">\n                        0.00011\n                    </td>',
+    )
+    assert rounded_display_html != PORTFOLIO_HTML  # guard against a silent no-op replace
+    result = await get_portfolio_snapshot(make_ctx(httpx.MockTransport(_portfolio_html_handler(rounded_display_html))))
+    btc = next(a for a in result["assets"] if a["asset"] == "BTC")
+    assert btc["total"]["rounded"] == 0.00011
+    assert btc["total"]["exact"] == 0.00010725
+    assert btc["total"]["rounded"] != btc["total"]["exact"]
+
+
+@pytest.mark.anyio
 async def test_get_portfolio_snapshot_degrades_gracefully_on_unparseable_tooltip():
     # A tooltip that doesn't match the one confirmed single-exchange
     # "<Exchange>: <amount>" shape must degrade to exact/per_exchange: null

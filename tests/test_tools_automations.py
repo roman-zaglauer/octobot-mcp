@@ -111,6 +111,20 @@ async def test_update_automations_sends_patch_as_raw_body_and_wraps_echo():
 
 
 @pytest.mark.anyio
+async def test_update_automations_classifies_malformed_2xx_body():
+    # Mirrors update_trading_config's/update_evaluator_config's own
+    # equivalent test (tests/test_tools_trading_config.py) -- a 2xx response
+    # with a non-JSON body is a genuine OctoBot-side malformed response, not
+    # something update_automations should silently pass through as success.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>not json</html>")
+
+    with pytest.raises(ToolError) as exc_info:
+        await update_automations(make_ctx(httpx.MockTransport(handler)), patch={"automations_count": 1})
+    assert "OctoBotMalformedResponseError" in str(exc_info.value)
+
+
+@pytest.mark.anyio
 async def test_update_automations_classifies_rejection():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="Can't save automation config")
